@@ -120,14 +120,19 @@ class RaspberryPiAgent:
             self.cleanup()
     
     def cleanup(self):
-        self.set_led(False)
-        if self.gpio_chip:
-            try:
-                GPIO.gpiochip_close(self.gpio_chip)
-            except:
-                pass
-        print("Avstängd")
-
+            self.set_led(False)
+    if self.conversation:
+        try:
+            self.conversation.end_session()
+        except:
+            pass
+    if self.gpio_chip:
+        try:
+            GPIO.gpiochip_close(self.gpio_chip)
+        except:
+            pass
+    print("Avstängd")
+   
 if __name__ == "__main__":
     agent = RaspberryPiAgent()
     agent.run()
