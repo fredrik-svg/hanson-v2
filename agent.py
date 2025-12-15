@@ -5,6 +5,8 @@ from elevenlabs import ElevenLabs
 from elevenlabs.conversational_ai.conversation import Conversation
 import sounddevice as sd
 import numpy as np
+from dotenv import load_dotenv
+load_dotenv()
 try:
     import lgpio as GPIO
     GPIO_AVAILABLE=True
