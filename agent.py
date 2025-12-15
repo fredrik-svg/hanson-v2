@@ -60,7 +60,7 @@ class RaspberryPiAgent:
         s.in_conversation=True;s.set_led(True)
         try:
             print("Startar...")
-            s.conversation=s.client.conversational_ai.create_conversation(agent_id=AGENT_ID,requires_auth=False)
+            s.conversation=await s.client.conversational_ai.conversation.start(agent_id=AGENT_ID)
             inp={'samplerate':SAMPLE_RATE,'channels':CHANNELS,'dtype':np.int16,'blocksize':CHUNK_SIZE}
             if s.input_device:inp['device']=s.input_device
             outp={'samplerate':SAMPLE_RATE,'channels':CHANNELS,'dtype':np.int16}
