@@ -1,0 +1,16 @@
+[Unit]
+Description=ElevenLabs Agent
+After=network.target bluetooth.target pipewire.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/elevenlabs-pi5-agent
+Environment="PATH=/home/pi/elevenlabs-pi5-agent/venv/bin"
+EnvironmentFile=/home/pi/elevenlabs-pi5-agent/.env
+ExecStart=/home/pi/elevenlabs-pi5-agent/venv/bin/python3 agent.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
