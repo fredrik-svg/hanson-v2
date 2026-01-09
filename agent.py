@@ -47,6 +47,10 @@ LED_BRIGHTNESS = 0.3  # 0.0-1.0 (30% brightness)
 # Knapp
 BUTTON_PIN = 17  # GPIO 17
 
+# LED state timeout constants (seconds)
+USER_SPEAKING_TIMEOUT = 3.0  # Timeout after user finishes speaking
+AGENT_SPEAKING_TIMEOUT = 2.0  # Timeout after agent finishes speaking
+
 
 class RaspberryPiAgent:
     """Agent som hanterar konversation, GPIO och ljudgränssnitt"""
@@ -208,10 +212,6 @@ class RaspberryPiAgent:
             self.led_effect_stop_event.set()
             # Use shorter timeout to prevent blocking, thread is daemon so it will cleanup anyway
             self.led_effect_thread.join(timeout=0.5)
-            if self.led_effect_thread.is_alive():
-                # Thread didn't stop in time, but it's daemon so it will terminate
-                # when main program exits. Just log this for debugging.
-                pass
         self.led_effect_stop_event.clear()
     
     def start_led_effect(self, effect_name, **kwargs):
@@ -300,7 +300,7 @@ class RaspberryPiAgent:
                 self.start_led_effect("user_speaking")
             
             # Schemalägg återgång till listening efter timeout
-            self._listening_timer = threading.Timer(3.0, self._return_to_listening)
+            self._listening_timer = threading.Timer(USER_SPEAKING_TIMEOUT, self._return_to_listening)
             self._listening_timer.daemon = True
             self._listening_timer.start()
     
@@ -319,7 +319,7 @@ class RaspberryPiAgent:
                 self.start_led_effect("agent_speaking")
             
             # Schemalägg återgång till listening efter timeout
-            self._listening_timer = threading.Timer(2.0, self._return_to_listening)
+            self._listening_timer = threading.Timer(AGENT_SPEAKING_TIMEOUT, self._return_to_listening)
             self._listening_timer.daemon = True
             self._listening_timer.start()
     
