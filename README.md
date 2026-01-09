@@ -115,7 +115,9 @@ LED-ringen visar aktuell status:
 |------|--------|-------------|
 | 🔴→🟢→🔵 | Startup | Färgcykel vid systemstart |
 | 🟢 Puls | Startar | Konversation initieras |
-| 🔵 Fast | Lyssnar | Agent lyssnar aktivt |
+| 🔵 Fast | Lyssnar | Agent lyssnar aktivt (redo att ta emot) |
+| 🟢 Pulsering | Användare pratar | Användaren har börjat prata |
+| 🟣 Pulsering | Agent pratar | Agenten svarar/pratar |
 | 🟠 Puls | Avslutar | Konversation avslutas |
 | 🔴 Puls | Fel | Ett fel uppstod |
 
