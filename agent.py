@@ -8,6 +8,7 @@ import os
 import sys
 import signal
 import time
+import threading
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
@@ -66,6 +67,11 @@ class RaspberryPiAgent:
         self.gpio_chip = None
         self.pixels = None
         self.conversation_active = False
+        
+        # LED effect control
+        self.led_effect_thread = None
+        self.led_effect_stop_event = threading.Event()
+        self.current_led_state = "idle"  # idle, listening, user_speaking, agent_speaking
         
         # Setup LED ring och knapp
         self.setup_led_ring()
@@ -194,6 +200,86 @@ class RaspberryPiAgent:
             time.sleep(0.05)
         self.set_led_off()
     
+    def stop_led_effect(self):
+        """Stoppar pågående LED-effekt"""
+        if self.led_effect_thread and self.led_effect_thread.is_alive():
+            self.led_effect_stop_event.set()
+            self.led_effect_thread.join(timeout=1.0)
+        self.led_effect_stop_event.clear()
+    
+    def start_led_effect(self, effect_name, **kwargs):
+        """Startar en kontinuerlig LED-effekt i en separat tråd"""
+        # Stoppa eventuell pågående effekt
+        self.stop_led_effect()
+        
+        # Starta ny effekt
+        if effect_name == "listening":
+            self.led_effect_thread = threading.Thread(
+                target=self._led_listening_effect_loop,
+                daemon=True
+            )
+        elif effect_name == "user_speaking":
+            self.led_effect_thread = threading.Thread(
+                target=self._led_user_speaking_effect_loop,
+                daemon=True
+            )
+        elif effect_name == "agent_speaking":
+            self.led_effect_thread = threading.Thread(
+                target=self._led_agent_speaking_effect_loop,
+                daemon=True
+            )
+        else:
+            return
+        
+        self.led_effect_thread.start()
+    
+    def _led_listening_effect_loop(self):
+        """Kontinuerlig effekt för listening state - solid blå/cyan"""
+        while not self.led_effect_stop_event.is_set():
+            if self.pixels:
+                self.set_led_color((0, 100, 255))  # Cyan/blå
+            time.sleep(0.1)
+    
+    def _led_user_speaking_effect_loop(self):
+        """Kontinuerlig effekt för user speaking - pulserande grön"""
+        while not self.led_effect_stop_event.is_set():
+            if self.pixels:
+                # Fade in
+                for i in range(20):
+                    if self.led_effect_stop_event.is_set():
+                        return
+                    brightness = i / 20 * LED_BRIGHTNESS
+                    self.set_led_color((0, 255, 0), brightness)  # Grön
+                    time.sleep(0.025)
+                
+                # Fade out
+                for i in range(20, 0, -1):
+                    if self.led_effect_stop_event.is_set():
+                        return
+                    brightness = i / 20 * LED_BRIGHTNESS
+                    self.set_led_color((0, 255, 0), brightness)  # Grön
+                    time.sleep(0.025)
+    
+    def _led_agent_speaking_effect_loop(self):
+        """Kontinuerlig effekt för agent speaking - pulserande lila/magenta"""
+        while not self.led_effect_stop_event.is_set():
+            if self.pixels:
+                # Fade in
+                for i in range(20):
+                    if self.led_effect_stop_event.is_set():
+                        return
+                    brightness = i / 20 * LED_BRIGHTNESS
+                    self.set_led_color((200, 0, 255), brightness)  # Lila/magenta
+                    time.sleep(0.025)
+                
+                # Fade out
+                for i in range(20, 0, -1):
+                    if self.led_effect_stop_event.is_set():
+                        return
+                    brightness = i / 20 * LED_BRIGHTNESS
+                    self.set_led_color((200, 0, 255), brightness)  # Lila/magenta
+                    time.sleep(0.025)
+    
     def read_button(self):
         """Läser knappstatus (True = nedtryckt)"""
         if self.gpio_chip:
@@ -202,6 +288,21 @@ class RaspberryPiAgent:
             except Exception as e:
                 print(f"Knapp-fel: {e}")
         return False
+    
+    # Callback methods för Conversation events
+    def on_user_transcript(self, transcript: str):
+        """Callback när användaren pratar (transkription mottagen)"""
+        print(f"Användare: {transcript}")
+        if self.current_led_state != "user_speaking":
+            self.current_led_state = "user_speaking"
+            self.start_led_effect("user_speaking")
+    
+    def on_agent_response(self, response: str):
+        """Callback när agenten svarar"""
+        print(f"Agent: {response}")
+        if self.current_led_state != "agent_speaking":
+            self.current_led_state = "agent_speaking"
+            self.start_led_effect("agent_speaking")
     
     def start_conversation(self):
         """Startar en konversation"""
@@ -217,20 +318,23 @@ class RaspberryPiAgent:
             # Skapa audio interface
             audio_interface = DefaultAudioInterface()
             
-            # Skapa konversation
+            # Skapa konversation med callbacks
             self.conversation = Conversation(
                 client=self.client,
                 agent_id=AGENT_ID,
                 requires_auth=True,
                 audio_interface=audio_interface,
+                callback_user_transcript=self.on_user_transcript,
+                callback_agent_response=self.on_agent_response,
             )
             
             # Starta session
             self.conversation.start_session()
             self.conversation_active = True
             
-            # Lyssnande state: blå/cyan färg
-            self.set_led_color((0, 100, 255))
+            # Lyssnande state: starta kontinuerlig listening effekt
+            self.current_led_state = "listening"
+            self.start_led_effect("listening")
             print("✓ Konversation aktiv - prata nu!")
             
         except Exception as e:
@@ -247,6 +351,9 @@ class RaspberryPiAgent:
         
         print("Avslutar konversation...")
         
+        # Stoppa LED-effekt
+        self.stop_led_effect()
+        
         # Orange puls vid avslut
         self.led_pulse_once((255, 100, 0))
         
@@ -259,6 +366,7 @@ class RaspberryPiAgent:
             self.set_led_off()
             self.conversation_active = False
             self.conversation = None
+            self.current_led_state = "idle"
             print("✓ Konversation avslutad")
     
     def run(self):
@@ -272,7 +380,9 @@ class RaspberryPiAgent:
         print(f"Button Pin: GPIO {BUTTON_PIN}")
         print("\nLED Status:")
         print("  Grön puls = Konversation startar")
-        print("  Blå/Cyan = Lyssnar")
+        print("  Blå/Cyan solid = Lyssnar (redo att ta emot)")
+        print("  Grön pulsering = Användaren pratar")
+        print("  Lila/Magenta pulsering = Agenten pratar")
         print("  Orange puls = Avslutar")
         print("  Röd puls = Fel")
         print("\nTryck knappen för att starta/stoppa konversation")
@@ -307,6 +417,9 @@ class RaspberryPiAgent:
                     self.conversation.end_session()
             except:
                 pass
+        
+        # Stoppa LED-effekter
+        self.stop_led_effect()
         
         # Släck LEDs
         self.set_led_off()
