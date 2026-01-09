@@ -1,6 +1,8 @@
-# LED Ring Status Effects - Implementation Summary
+# LED Ring Status Effects - Implementation Summary / Implementeringssammanfattning
 
-## Översikt
+## Overview / Översikt
+This implementation adds dynamic LED ring effects that vary based on the conversation status with the ElevenLabs Conversational AI.
+
 Denna implementation lägger till dynamiska LED-ringeffekter som varierar beroende på konversationens status med ElevenLabs Conversational AI.
 
 ## Implementerade funktioner

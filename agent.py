@@ -72,6 +72,8 @@ class RaspberryPiAgent:
         self.led_effect_thread = None
         self.led_effect_stop_event = threading.Event()
         self.current_led_state = "idle"  # idle, listening, user_speaking, agent_speaking
+        self.state_lock = threading.Lock()  # Lock for thread-safe state changes
+        self._listening_timer = None
         
         # Setup LED ring och knapp
         self.setup_led_ring()
@@ -204,7 +206,12 @@ class RaspberryPiAgent:
         """Stoppar pågående LED-effekt"""
         if self.led_effect_thread and self.led_effect_thread.is_alive():
             self.led_effect_stop_event.set()
-            self.led_effect_thread.join(timeout=1.0)
+            # Use shorter timeout to prevent blocking, thread is daemon so it will cleanup anyway
+            self.led_effect_thread.join(timeout=0.5)
+            if self.led_effect_thread.is_alive():
+                # Thread didn't stop in time, but it's daemon so it will terminate
+                # when main program exits. Just log this for debugging.
+                pass
         self.led_effect_stop_event.clear()
     
     def start_led_effect(self, effect_name, **kwargs):
@@ -281,41 +288,47 @@ class RaspberryPiAgent:
     def on_user_transcript(self, transcript: str):
         """Callback när användaren pratar (transkription mottagen)"""
         print(f"Användare: {transcript}")
-        if self.current_led_state != "user_speaking":
-            self.current_led_state = "user_speaking"
-            self.start_led_effect("user_speaking")
         
-        # Efter user speaking, återgå till listening efter en timeout
-        # Detta hanterar fall där agenten inte svarar direkt
-        if hasattr(self, '_listening_timer'):
-            self._listening_timer.cancel()
-        self._listening_timer = threading.Timer(3.0, self._return_to_listening)
-        self._listening_timer.daemon = True
-        self._listening_timer.start()
+        with self.state_lock:
+            # Avbryt eventuell pågående timer
+            if self._listening_timer is not None:
+                self._listening_timer.cancel()
+            
+            # Uppdatera LED state om nödvändigt
+            if self.current_led_state != "user_speaking":
+                self.current_led_state = "user_speaking"
+                self.start_led_effect("user_speaking")
+            
+            # Schemalägg återgång till listening efter timeout
+            self._listening_timer = threading.Timer(3.0, self._return_to_listening)
+            self._listening_timer.daemon = True
+            self._listening_timer.start()
     
     def on_agent_response(self, response: str):
         """Callback när agenten svarar"""
         print(f"Agent: {response}")
-        # Avbryt eventuell timeout från user speaking
-        if hasattr(self, '_listening_timer'):
-            self._listening_timer.cancel()
         
-        if self.current_led_state != "agent_speaking":
-            self.current_led_state = "agent_speaking"
-            self.start_led_effect("agent_speaking")
-        
-        # Efter agent svarar, återgå till listening efter en timeout
-        if hasattr(self, '_listening_timer'):
-            self._listening_timer.cancel()
-        self._listening_timer = threading.Timer(2.0, self._return_to_listening)
-        self._listening_timer.daemon = True
-        self._listening_timer.start()
+        with self.state_lock:
+            # Avbryt eventuell pågående timer
+            if self._listening_timer is not None:
+                self._listening_timer.cancel()
+            
+            # Uppdatera LED state om nödvändigt
+            if self.current_led_state != "agent_speaking":
+                self.current_led_state = "agent_speaking"
+                self.start_led_effect("agent_speaking")
+            
+            # Schemalägg återgång till listening efter timeout
+            self._listening_timer = threading.Timer(2.0, self._return_to_listening)
+            self._listening_timer.daemon = True
+            self._listening_timer.start()
     
     def _return_to_listening(self):
         """Återgår till listening state om konversationen är aktiv"""
-        if self.conversation_active and self.current_led_state != "listening":
-            self.current_led_state = "listening"
-            self.start_led_effect("listening")
+        with self.state_lock:
+            if self.conversation_active and self.current_led_state != "listening":
+                self.current_led_state = "listening"
+                self.start_led_effect("listening")
     
     def start_conversation(self):
         """Startar en konversation"""
@@ -364,9 +377,11 @@ class RaspberryPiAgent:
         
         print("Avslutar konversation...")
         
-        # Avbryt eventuell listening timer
-        if hasattr(self, '_listening_timer'):
-            self._listening_timer.cancel()
+        # Avbryt eventuell listening timer (thread-safe)
+        with self.state_lock:
+            if self._listening_timer is not None:
+                self._listening_timer.cancel()
+                self._listening_timer = None
         
         # Stoppa LED-effekt
         self.stop_led_effect()
