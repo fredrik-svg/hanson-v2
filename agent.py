@@ -23,7 +23,7 @@ load_dotenv()
 def suppress_alsa_errors():
     """
     Kontexthanterare för att tysta ALSA-fel/varningar.
-    ALSA skriver felmeddelanden direkt till stderr, vilket kan kludda konsolutmatningen.
+    ALSA skriver felmeddelanden direkt till stderr, vilket kan kluddra konsolutmatningen.
     Detta händer när PyAudio/sounddevice initierar ljudgränssnitt på Raspberry Pi.
     """
     # Öppna /dev/null för att omdirigera felutskrifter
