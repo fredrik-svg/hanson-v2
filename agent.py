@@ -9,6 +9,7 @@ import sys
 import signal
 import time
 import threading
+from contextlib import contextmanager
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import Conversation
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
@@ -16,6 +17,29 @@ from dotenv import load_dotenv
 
 # Ladda miljövariabler
 load_dotenv()
+
+
+@contextmanager
+def suppress_alsa_errors():
+    """
+    Kontexthanterare för att tysta ALSA-fel/varningar.
+    ALSA skriver felmeddelanden direkt till stderr, vilket kan kludda konsolutmatningen.
+    Detta händer när PyAudio/sounddevice initierar ljudgränssnitt på Raspberry Pi.
+    """
+    # Öppna /dev/null för att omdirigera felutskrifter
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    # Spara nuvarande stderr
+    old_stderr = os.dup(2)
+    # Omdirigera stderr till /dev/null
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    
+    try:
+        yield
+    finally:
+        # Återställ stderr
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
 
 # WS2812B LED Ring
 try:
@@ -342,8 +366,9 @@ class RaspberryPiAgent:
             # Visuell feedback: grön puls
             self.led_pulse_once((0, 255, 0))
             
-            # Skapa audio interface
-            audio_interface = DefaultAudioInterface()
+            # Skapa audio interface med ALSA-fel undertryckta
+            with suppress_alsa_errors():
+                audio_interface = DefaultAudioInterface()
             
             # Vänta för att låta högtalaren aktiveras innan ljud spelas
             print(f"Väntar {SPEAKER_STARTUP_DELAY}s för högtalare att aktiveras...")
