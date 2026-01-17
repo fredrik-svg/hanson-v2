@@ -11,7 +11,7 @@ import time
 import threading
 from contextlib import contextmanager
 from elevenlabs.client import ElevenLabs
-from elevenlabs.conversational_ai.conversation import Conversation
+from elevenlabs.conversational_ai.conversation import Conversation, ConversationInitiationData
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from dotenv import load_dotenv
 
@@ -393,6 +393,18 @@ class RaspberryPiAgent:
                 self.led_pulse_once((255, 0, 0))
                 return
             
+            # Skapa conversation config för att inaktivera initial greeting
+            # Detta förhindrar att agenten svarar på sin egen fråga
+            conversation_override = {
+                "agent": {
+                    "first_message": ""  # Tom sträng = agenten väntar tyst på användaren
+                }
+            }
+            
+            config = ConversationInitiationData(
+                conversation_config_override=conversation_override
+            )
+            
             # Skapa konversation med callbacks och pre-initierad audio interface
             self.conversation = Conversation(
                 client=self.client,
@@ -401,6 +413,7 @@ class RaspberryPiAgent:
                 audio_interface=self.audio_interface,
                 callback_user_transcript=self.on_user_transcript,
                 callback_agent_response=self.on_agent_response,
+                config=config,
             )
             
             # Starta session
