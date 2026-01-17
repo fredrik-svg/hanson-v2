@@ -83,6 +83,11 @@ Få dina nycklar på:
 - API Key: https://elevenlabs.io/app/settings/api-keys
 - Agent ID: https://elevenlabs.io/app/conversational-ai
 
+**Konfigurera agenten i ElevenLabs Dashboard:**
+1. Gå till din agent i ElevenLabs Dashboard (https://elevenlabs.io/app/conversational-ai)
+2. Under **Prompt** → **First Message**: Lämna tomt för tyst start, eller ställ in önskat hälsningsmeddelande
+3. Justera andra inställningar som språk, röst, och system prompt efter behov
+
 ### 4. Para Bluetooth-högtalare
 
 ```bash

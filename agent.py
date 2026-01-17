@@ -393,17 +393,11 @@ class RaspberryPiAgent:
                 self.led_pulse_once((255, 0, 0))
                 return
             
-            # Skapa conversation config för att inaktivera initial greeting
-            # Detta förhindrar att agenten svarar på sin egen fråga
-            conversation_override = {
-                "agent": {
-                    "first_message": ""  # Tom sträng = agenten väntar tyst på användaren
-                }
-            }
-            
-            config = ConversationInitiationData(
-                conversation_config_override=conversation_override
-            )
+            # Obs: För att konfigurera eller inaktivera initial greeting, 
+            # gå till ElevenLabs Dashboard -> Agent Settings -> Prompt -> First Message
+            # och lämna det tomt eller ställ in önskat meddelande där.
+            # Override av first_message kräver att det är aktiverat i agent säkerhetsinställningar.
+            config = ConversationInitiationData()
             
             # Skapa konversation med callbacks och pre-initierad audio interface
             self.conversation = Conversation(
