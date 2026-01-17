@@ -345,6 +345,10 @@ class RaspberryPiAgent:
             # Skapa audio interface
             audio_interface = DefaultAudioInterface()
             
+            # Vänta för att låta högtalaren aktiveras innan ljud spelas
+            print(f"Väntar {SPEAKER_STARTUP_DELAY}s för högtalare att aktiveras...")
+            time.sleep(SPEAKER_STARTUP_DELAY)
+            
             # Skapa konversation med callbacks
             self.conversation = Conversation(
                 client=self.client,
@@ -358,10 +362,6 @@ class RaspberryPiAgent:
             # Starta session
             self.conversation.start_session()
             self.conversation_active = True
-            
-            # Vänta för att låta högtalaren aktiveras innan ljud spelas
-            print(f"Väntar {SPEAKER_STARTUP_DELAY}s för högtalare...")
-            time.sleep(SPEAKER_STARTUP_DELAY)
             
             # Lyssnande state: starta kontinuerlig listening effekt
             self.current_led_state = "listening"
