@@ -52,6 +52,22 @@ CHUNK_SIZE = 2048  # Try 512, 1024, 2048, 4096
 ping api.elevenlabs.io
 ```
 
+### Policy Violation Error (first_message override)
+If you see:
+```
+Error: received 1008 (policy violation) Override for field 'first_message' is not allowed by config.
+```
+
+**Solution:**
+1. Go to [ElevenLabs Dashboard](https://elevenlabs.io/app/conversational-ai)
+2. Select your agent
+3. Under **Prompt** → **First Message**:
+   - Leave empty for silent start (agent waits for user)
+   - Or set your preferred greeting message
+4. Save changes
+
+**Note:** The `first_message` field cannot be overridden from code unless explicitly enabled in your agent's security settings. It's easier to configure it directly in the dashboard.
+
 ## Button Issues
 
 ### Not responding
