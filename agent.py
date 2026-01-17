@@ -389,6 +389,7 @@ class RaspberryPiAgent:
             # Kontrollera att audio interface är initierat
             if not self.audio_interface:
                 print("Fel: Audio interface inte tillgängligt")
+                print("Starta om applikationen eller kontrollera ljudenheter")
                 self.led_pulse_once((255, 0, 0))
                 return
             
