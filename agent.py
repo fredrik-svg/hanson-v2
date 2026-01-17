@@ -107,6 +107,10 @@ class RaspberryPiAgent:
         # Setup LED ring och knapp
         self.setup_led_ring()
         self.setup_button()
+        
+        # Pre-initialize audio interface so speaker is ready when button is pressed
+        self.audio_interface = None
+        self.setup_audio_interface()
     
     def setup_led_ring(self):
         """Initierar WS2812B LED-ring"""
@@ -139,6 +143,22 @@ class RaspberryPiAgent:
         except Exception as e:
             print(f"Knapp-fel: {e}")
             self.gpio_chip = None
+    
+    def setup_audio_interface(self):
+        """Initierar audio interface vid start så högtalaren är redo"""
+        try:
+            print("Initierar audio interface...")
+            # Skapa audio interface med ALSA-fel undertryckta
+            with suppress_alsa_errors():
+                self.audio_interface = DefaultAudioInterface()
+            
+            # Vänta för att låta högtalaren aktiveras
+            print(f"Väntar {SPEAKER_STARTUP_DELAY}s för högtalare att aktiveras...")
+            time.sleep(SPEAKER_STARTUP_DELAY)
+            print("✓ Audio interface redo")
+        except Exception as e:
+            print(f"Audio interface-fel: {e}")
+            self.audio_interface = None
     
     def set_led_color(self, color, brightness=None):
         """
@@ -366,20 +386,18 @@ class RaspberryPiAgent:
             # Visuell feedback: grön puls
             self.led_pulse_once((0, 255, 0))
             
-            # Skapa audio interface med ALSA-fel undertryckta
-            with suppress_alsa_errors():
-                audio_interface = DefaultAudioInterface()
+            # Kontrollera att audio interface är initierat
+            if not self.audio_interface:
+                print("Fel: Audio interface inte tillgängligt")
+                self.led_pulse_once((255, 0, 0))
+                return
             
-            # Vänta för att låta högtalaren aktiveras innan ljud spelas
-            print(f"Väntar {SPEAKER_STARTUP_DELAY}s för högtalare att aktiveras...")
-            time.sleep(SPEAKER_STARTUP_DELAY)
-            
-            # Skapa konversation med callbacks
+            # Skapa konversation med callbacks och pre-initierad audio interface
             self.conversation = Conversation(
                 client=self.client,
                 agent_id=AGENT_ID,
                 requires_auth=True,
-                audio_interface=audio_interface,
+                audio_interface=self.audio_interface,
                 callback_user_transcript=self.on_user_transcript,
                 callback_agent_response=self.on_agent_response,
             )
