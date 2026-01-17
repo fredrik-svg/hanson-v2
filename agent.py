@@ -74,7 +74,7 @@ BUTTON_PIN = 17  # GPIO 17
 # LED state timeout constants (seconds)
 USER_SPEAKING_TIMEOUT = 3.0  # Timeout after user finishes speaking
 AGENT_SPEAKING_TIMEOUT = 2.0  # Timeout after agent finishes speaking
-SPEAKER_STARTUP_DELAY = 1.5  # Delay to allow speaker to activate before audio plays
+SPEAKER_STARTUP_DELAY = 3.0  # Delay to allow speaker to activate before audio plays
 
 
 class RaspberryPiAgent:
