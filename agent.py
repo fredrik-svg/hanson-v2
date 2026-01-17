@@ -157,7 +157,7 @@ class RaspberryPiAgent:
             time.sleep(SPEAKER_STARTUP_DELAY)
             print("✓ Audio interface redo")
         except Exception as e:
-            print(f"Audio interface-fel: {e}")
+            print(f"Fel vid initialisering av audio interface: {e}")
             self.audio_interface = None
     
     def set_led_color(self, color, brightness=None):
