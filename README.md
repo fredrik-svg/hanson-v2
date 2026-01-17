@@ -124,11 +124,12 @@ LED-ringen visar aktuell status:
 ## 📖 Användning
 
 1. **Starta agenten**: `python3 agent.py`
-2. **LED-ringen blinkar**: Systemet är redo (röd→grön→blå)
-3. **Tryck knappen**: Startar konversation (LED blir blå)
-4. **Prata med agenten**: Ställ frågor eller ge kommandon
-5. **Tryck knappen igen**: Avslutar konversation (LED släcks)
-6. **Stoppa agenten**: Ctrl+C
+2. **Vänta på initialisering**: Systemet initierar audio interface (~3s) och LED-ringen blinkar (röd→grön→blå)
+3. **Systemet är redo**: Audio interface är nu aktiverat och högtalaren är redo
+4. **Tryck knappen**: Startar konversation omedelbart (LED blir blå)
+5. **Prata med agenten**: Ställ frågor eller ge kommandon
+6. **Tryck knappen igen**: Avslutar konversation (LED släcks)
+7. **Stoppa agenten**: Ctrl+C
 
 ## 🔧 Konfiguration
 
