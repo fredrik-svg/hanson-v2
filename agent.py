@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Hanson v3 - agent.py
+Hanson v3 - agent.py (steg 1: knapp + LED)
 ElevenLabs Conversational AI Agent för Raspberry Pi 5
 
 Hårdvara:
   WS2812B LED-ring  → GPIO 10 / SPI0 MOSI (Pin 19)  via Pi5Neo
-  OLED SH1106 1.3"  → I2C SDA/SCL (Pin 3/5)         via luma.oled
-  PIR HC-SR501      → GPIO 27 (Pin 13)               via lgpio
   Knapp             → GPIO 17 (Pin 11)               via lgpio
+  PIR HC-SR501      → GPIO 27 (Pin 13)               via lgpio
 
-Installation:
-  pip install elevenlabs python-dotenv pi5neo luma.oled pillow lgpio
+Installation i venv:
+  pip install elevenlabs python-dotenv pi5neo lgpio
 """
 
 import os
@@ -30,11 +29,8 @@ from elevenlabs.conversational_ai.conversation import (
 from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from dotenv import load_dotenv
 
-from display import TFTDisplay, HansonState
-
 load_dotenv()
 
-# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -42,7 +38,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("hanson")
 
-# ── ALSA-suppression ───────────────────────────────────────────────────────────
 @contextmanager
 def suppress_alsa_errors():
     devnull = os.open(os.devnull, os.O_WRONLY)
@@ -61,7 +56,7 @@ try:
     GPIO_AVAILABLE = True
 except ImportError:
     GPIO_AVAILABLE = False
-    log.warning("lgpio saknas – knapp och PIR inaktiverade")
+    log.warning("lgpio saknas")
 
 # ── LED via Pi5Neo ─────────────────────────────────────────────────────────────
 try:
@@ -69,9 +64,8 @@ try:
     LED_AVAILABLE = True
 except ImportError:
     LED_AVAILABLE = False
-    log.warning("pi5neo saknas – LED-ring inaktiverad. Installera: pip install pi5neo")
+    log.warning("pi5neo saknas")
 
-# ── Konfiguration ──────────────────────────────────────────────────────────────
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 AGENT_ID           = os.getenv("ELEVENLABS_AGENT_ID")
 
@@ -79,17 +73,14 @@ LED_COUNT  = 16
 BUTTON_PIN = 17
 PIR_PIN    = 27
 
-# PIR-cooldown: ignorera ny rörelse kort tid efter avslutad konversation
-PIR_COOLDOWN_AFTER_END = 8.0   # sekunder
+PIR_COOLDOWN_AFTER_END = 8.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 class LEDController:
-    """WS2812B via Pi5Neo på SPI0 (GPIO 10). Separat från I2C-displayen."""
 
     IDLE           = (0,   0,   0)
     LISTENING      = (0,   100, 255)
-    USER_SPEAKING  = (0,   255, 0)
     AGENT_SPEAKING = (200, 0,   255)
     THINKING       = (255, 165, 0)
     SUCCESS        = (0,   255, 0)
@@ -108,8 +99,7 @@ class LEDController:
             return
         try:
             self.neo = Pi5Neo('/dev/spidev0.0', LED_COUNT, 800)
-            self.neo.fill_strip(0, 0, 0)
-            self.neo.update_strip()
+            self._fill(0, 0, 0)
             log.info(f"LED Ring: {LED_COUNT} LEDs via Pi5Neo/SPI0")
             self._startup_animation()
         except Exception as e:
@@ -119,7 +109,7 @@ class LEDController:
     def _startup_animation(self):
         for r, g, b in [(255,0,0), (0,255,0), (0,0,255)]:
             self._fill(r, g, b)
-            time.sleep(0.25)
+            time.sleep(0.3)
         self._fill(0, 0, 0)
 
     def _fill(self, r, g, b):
@@ -149,26 +139,19 @@ class LEDController:
             time.sleep(0.04)
         self._fill(0, 0, 0)
 
-    def set_solid(self, color):
-        self.stop_effect()
-        self._fill(*color)
-
     def start_listening(self):
         self.stop_effect()
         self._fill(*self.LISTENING)
 
-    def start_motion(self):
-        self.stop_effect()
-        self._fill(*self.MOTION)
-
-    def start_user_speaking(self):
-        self._run(self._pulse_loop, color=self.USER_SPEAKING)
+    def start_thinking(self):
+        self._run(self._spinner_loop, color=self.THINKING)
 
     def start_agent_speaking(self):
         self._run(self._pulse_loop, color=self.AGENT_SPEAKING)
 
-    def start_thinking(self):
-        self._run(self._spinner_loop, color=self.THINKING)
+    def start_motion(self):
+        self.stop_effect()
+        self._fill(*self.MOTION)
 
     def _pulse_loop(self, color):
         r, g, b = color
@@ -242,7 +225,6 @@ class RaspberryPiAgent:
 
         self.client              = ElevenLabs(api_key=ELEVENLABS_API_KEY)
         self.led                 = LEDController()
-        self.display             = TFTDisplay()
         self.gpio_chip           = None
         self.audio_interface     = None
         self.conversation        = None
@@ -251,7 +233,6 @@ class RaspberryPiAgent:
 
         self._setup_gpio()
         self._setup_audio()
-        self._start_connectivity_monitor()
 
     def _setup_gpio(self):
         if not GPIO_AVAILABLE:
@@ -276,70 +257,53 @@ class RaspberryPiAgent:
             log.error(f"Audio-fel: {e}")
             self.audio_interface = None
 
-    def _start_connectivity_monitor(self):
-        def _monitor():
-            while True:
-                self.display.check_connectivity()
-                time.sleep(30)
-        threading.Thread(target=_monitor, daemon=True).start()
-
     def _build_client_tools(self) -> ClientTools:
         ct = ClientTools()
         ct.register("set_led_color",     self.led.tool_set_color,    is_async=False)
         ct.register("run_led_animation", self.led.tool_run_animation, is_async=False)
         return ct
 
-    # ── ElevenLabs Callbacks ───────────────────────────────────────────────────
     def _on_user_transcript(self, transcript: str):
         log.info(f"Användare: {transcript}")
-        self.display.set_transcript(transcript)
-        self.display.set_state(HansonState.THINKING)
         self.led.start_thinking()
 
     def _on_agent_response(self, response: str):
         log.info(f"Agent: {response}")
 
     def _on_agent_response_correction(self, original: str, corrected: str):
-        log.info(f"Agent (korrigering): '{original}' → '{corrected}'")
+        log.info(f"Agent (korrigering): '{original[:40]}' → '{corrected[:40]}'")
 
     def _on_agent_chat_response_part(self, text: str, part_type: AgentChatResponsePartType):
         if part_type == AgentChatResponsePartType.START:
-            self.display.set_state(HansonState.SPEAKING)
             self.led.start_agent_speaking()
         elif part_type == AgentChatResponsePartType.STOP:
             if self.conversation_active:
-                self.display.set_state(HansonState.LISTENING)
                 self.led.start_listening()
 
     def _on_latency(self, latency_ms: int):
-        log.debug(f"Latens: {latency_ms}ms")
-        self.display.set_latency(latency_ms)
+        log.info(f"Latens: {latency_ms}ms")
 
     def _on_end_session(self):
-        log.info("Session avslutad av ElevenLabs")
+        log.info("Session avslutad")
         self._cleanup_after_session()
 
-    # ── Konversation ───────────────────────────────────────────────────────────
     def _cleanup_after_session(self):
         self.conversation_active = False
         self._last_session_end   = time.time()
-        self.display.set_state(HansonState.IDLE)
-        self.display.set_transcript("")
         self.led.stop_effect()
         self.led.pulse_once(LEDController.ENDING)
+        log.info("Redo för nästa konversation")
 
     def start_conversation(self, trigger: str = "knapp"):
         if self.conversation_active:
             return
         if not self.audio_interface:
             log.error("Audio interface saknas")
-            self.display.set_state(HansonState.ERROR)
             self.led.pulse_once(LEDController.ERROR)
             return
 
         try:
             log.info(f"Startar konversation (trigger: {trigger})…")
-            self.display.set_state(HansonState.LISTENING)
             self.led.pulse_once(LEDController.SUCCESS)
 
             self.conversation = Conversation(
@@ -359,24 +323,21 @@ class RaspberryPiAgent:
 
             self.conversation.start_session()
             self.conversation_active = True
-
             self.conversation.send_contextual_update(
                 f"Konversationen startades via {trigger}. Hälsa besökaren välkommen på svenska."
             )
-
             self.led.start_listening()
-            log.info("Konversation aktiv – prata nu!")
+            log.info("Konversation aktiv!")
 
         except Exception as e:
             log.error(f"Startfel: {e}")
-            self.display.set_state(HansonState.ERROR)
             self.led.pulse_once(LEDController.ERROR)
             self.conversation_active = False
 
     def end_conversation(self):
         if not self.conversation_active:
             return
-        log.info("Avslutar konversation manuellt…")
+        log.info("Avslutar konversation…")
         try:
             if self.conversation:
                 self.conversation.end_session()
@@ -408,29 +369,31 @@ class RaspberryPiAgent:
     def _pir_in_cooldown(self) -> bool:
         return (time.time() - self._last_session_end) < PIR_COOLDOWN_AFTER_END
 
-    # ── Huvudloop ──────────────────────────────────────────────────────────────
     def run(self):
         print()
-        print("=" * 52)
-        print("  Hanson v3 – ElevenLabs Conversational AI")
-        print("  Raspberry Pi 5 + WS2812B + OLED SH1106")
-        print("=" * 52)
-        print(f"  Agent ID  : {AGENT_ID}")
-        print(f"  Knapp     : GPIO {BUTTON_PIN}")
-        print(f"  PIR       : GPIO {PIR_PIN}")
+        print("=" * 48)
+        print("  Hanson v3 – Steg 1: Knapp + LED")
+        print("=" * 48)
+        print(f"  Knapp : GPIO {BUTTON_PIN} — starta/stoppa")
+        print(f"  PIR   : GPIO {PIR_PIN}   — rörelsestart")
         print()
-        print("  Tryck knappen eller rör dig framför PIR")
+        print("  LED-status:")
+        print("   Röd→Grön→Blå puls  = Startar upp")
+        print("   Grön puls          = Konversation startar")
+        print("   Blå/Cyan solid     = Lyssnar")
+        print("   Orange spinner     = Tänker")
+        print("   Lila puls          = Agenten pratar")
+        print("   Orange puls        = Avslutar")
+        print("   Röd puls           = Fel")
+        print()
         print("  Ctrl+C för att avsluta")
         print()
-
-        self.display.set_state(HansonState.IDLE)
 
         last_btn      = False
         pir_triggered = False
 
         try:
             while True:
-                # ── Knapp ─────────────────────────────────────────────────
                 btn = self._read_button()
                 if btn and not last_btn:
                     if not self.conversation_active:
@@ -439,15 +402,13 @@ class RaspberryPiAgent:
                         self.end_conversation()
                 last_btn = btn
 
-                # ── PIR ───────────────────────────────────────────────────
                 pir = self._read_pir()
                 if pir and not pir_triggered:
                     if not self.conversation_active and not self._pir_in_cooldown():
-                        log.info("Rörelse detekterad – startar konversation")
-                        self.display.set_state(HansonState.MOTION)
+                        log.info("Rörelse detekterad")
                         self.led.start_motion()
                         time.sleep(0.8)
-                        self.start_conversation(trigger="rörelsedetektering")
+                        self.start_conversation(trigger="rörelse")
                 pir_triggered = pir
 
                 time.sleep(0.05)
@@ -464,7 +425,6 @@ class RaspberryPiAgent:
             except Exception:
                 pass
         self.led.cleanup()
-        self.display.cleanup()
         if self.gpio_chip:
             try:
                 GPIO.gpiochip_close(self.gpio_chip)
@@ -473,7 +433,6 @@ class RaspberryPiAgent:
         log.info("Hanson avstängd")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 def main():
     agent = RaspberryPiAgent()
     agent.run()
