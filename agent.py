@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hanson v3 - agent.py (steg 1: knapp + LED)
-Custom AudioInterface för ReSpeaker (card 2) + USB-högtalare (card 3)
+Custom AudioInterface för ReSpeaker (card 1) + USB-högtalare (card 2)
 """
 
 import os
@@ -10,7 +10,6 @@ import time
 import threading
 import logging
 import queue
-from contextlib import contextmanager
 
 import pyaudio
 
@@ -56,15 +55,16 @@ LED_COUNT  = 16
 BUTTON_PIN = 17
 PIR_PIN    = 27
 
-# ALSA card-index — justera om USB-enheter byter ordning vid reboot
-INPUT_CARD  = 2   # ReSpeaker 4 Mic Array
-OUTPUT_CARD = 3   # USB-högtalare
+# Audio-enheter (index från PyAudio)
+INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array (hw:2,0)
+OUTPUT_DEVICE = 2   # USB-högtalare (hw:3,0)
 
-SAMPLE_RATE   = 16000
-CHANNELS_IN   = 1
-CHANNELS_OUT  = 1
-CHUNK         = 1024
-FORMAT        = pyaudio.paInt16
+SAMPLE_RATE_IN  = 16000   # ReSpeaker native
+SAMPLE_RATE_OUT = 48000   # USB-högtalare native
+CHANNELS_IN     = 6       # ReSpeaker har 6 kanaler
+CHANNELS_OUT    = 2       # Stereo ut
+CHUNK           = 1024
+FORMAT          = pyaudio.paInt16
 
 PIR_COOLDOWN_AFTER_END = 10.0
 
@@ -72,43 +72,44 @@ PIR_COOLDOWN_AFTER_END = 10.0
 # ══════════════════════════════════════════════════════════════════════════════
 class HansonAudioInterface(AudioInterface):
     """
-    Custom AudioInterface som explicit använder:
-      Input  → ALSA card 2 (ReSpeaker 4 Mic Array)
-      Output → ALSA card 3 (USB-högtalare)
+    Custom AudioInterface:
+      Input  → ReSpeaker 4 Mic Array (index 1, 6ch, 16kHz)
+      Output → USB-högtalare (index 2, 2ch, 48kHz)
     """
 
     def __init__(self):
-        self.p          = pyaudio.PyAudio()
-        self.in_stream  = None
-        self.out_stream = None
-        self._out_queue = queue.Queue()
+        self.p           = pyaudio.PyAudio()
+        self.in_stream   = None
+        self.out_stream  = None
+        self._out_queue  = queue.Queue()
         self._out_thread = None
-        self._running   = False
+        self._running    = False
 
     def start(self, input_callback):
         self._running = True
 
-        # Input: ReSpeaker
+        # ── Input: ReSpeaker ──────────────────────────────────────────────
+        def _in_callback(in_data, frame_count, time_info, status):
+            input_callback(in_data)
+            return (None, pyaudio.paContinue)
+
         self.in_stream = self.p.open(
             format=FORMAT,
             channels=CHANNELS_IN,
-            rate=SAMPLE_RATE,
+            rate=SAMPLE_RATE_IN,
             input=True,
-            input_device_index=INPUT_CARD,
+            input_device_index=INPUT_DEVICE,
             frames_per_buffer=CHUNK,
-            stream_callback=lambda in_data, frame_count, time_info, status: (
-                input_callback(in_data),
-                pyaudio.paContinue,
-            )[1],
+            stream_callback=_in_callback,
         )
 
-        # Output: USB-högtalare
+        # ── Output: USB-högtalare ─────────────────────────────────────────
         self.out_stream = self.p.open(
             format=FORMAT,
             channels=CHANNELS_OUT,
-            rate=SAMPLE_RATE,
+            rate=SAMPLE_RATE_OUT,
             output=True,
-            output_device_index=OUTPUT_CARD,
+            output_device_index=OUTPUT_DEVICE,
             frames_per_buffer=CHUNK,
         )
 
@@ -116,7 +117,8 @@ class HansonAudioInterface(AudioInterface):
         self._out_thread = threading.Thread(target=self._output_loop, daemon=True)
         self._out_thread.start()
 
-        log.info(f"Audio: input=card{INPUT_CARD} output=card{OUTPUT_CARD}")
+        log.info(f"Audio: input=index{INPUT_DEVICE} ({SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch) "
+                 f"output=index{OUTPUT_DEVICE} ({SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
 
     def _output_loop(self):
         while self._running:
@@ -139,18 +141,19 @@ class HansonAudioInterface(AudioInterface):
                 self.in_stream.close()
             except Exception:
                 pass
+            self.in_stream = None
         if self.out_stream:
             try:
                 self.out_stream.stop_stream()
                 self.out_stream.close()
             except Exception:
                 pass
+            self.out_stream = None
 
     def output(self, audio: bytes):
         self._out_queue.put(audio)
 
     def interrupt(self):
-        # Töm output-kön vid avbrott
         while not self._out_queue.empty():
             try:
                 self._out_queue.get_nowait()
@@ -336,21 +339,16 @@ class RaspberryPiAgent:
             self.gpio_chip = None
 
     def _verify_audio(self):
-        """Verifiera att rätt ljudenheter finns innan vi startar."""
         p = pyaudio.PyAudio()
         try:
             count = p.get_device_count()
-            log.info(f"PyAudio: {count} ljudenheter hittade")
-            if INPUT_CARD < count:
-                d = p.get_device_info_by_index(INPUT_CARD)
-                log.info(f"Input  (card {INPUT_CARD}): {d['name']}")
-            else:
-                log.warning(f"Input card {INPUT_CARD} finns inte!")
-            if OUTPUT_CARD < count:
-                d = p.get_device_info_by_index(OUTPUT_CARD)
-                log.info(f"Output (card {OUTPUT_CARD}): {d['name']}")
-            else:
-                log.warning(f"Output card {OUTPUT_CARD} finns inte!")
+            for idx, label in [(INPUT_DEVICE, "Input"), (OUTPUT_DEVICE, "Output")]:
+                if idx < count:
+                    d = p.get_device_info_by_index(idx)
+                    log.info(f"{label} (index {idx}): {d['name']} "
+                             f"in:{d['maxInputChannels']} out:{d['maxOutputChannels']}")
+                else:
+                    log.warning(f"{label} index {idx} finns inte!")
         finally:
             p.terminate()
 
@@ -396,7 +394,7 @@ class RaspberryPiAgent:
         with self._session_lock:
             if self.conversation_active:
                 return
-            self.conversation_active = True   # Sätt direkt för att blockera dubbel-trigger
+            self.conversation_active = True
 
         audio = HansonAudioInterface()
 
@@ -475,8 +473,8 @@ class RaspberryPiAgent:
         print("=" * 48)
         print("  Hanson v3 – Steg 1: Knapp + LED")
         print("=" * 48)
-        print(f"  Input  : card {INPUT_CARD} (ReSpeaker)")
-        print(f"  Output : card {OUTPUT_CARD} (USB-högtalare)")
+        print(f"  Input  : index {INPUT_DEVICE} (ReSpeaker, {SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch)")
+        print(f"  Output : index {OUTPUT_DEVICE} (USB-högtalare, {SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
         print(f"  Knapp  : GPIO {BUTTON_PIN}")
         print(f"  PIR    : GPIO {PIR_PIN}")
         print()
