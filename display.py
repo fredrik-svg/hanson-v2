@@ -157,7 +157,6 @@ class TFTDisplay:
                 serial,
                 width=self.W,
                 height=self.H,
-                bgr=False,
                 rotate=0,
             )
             log.info(f"ST7735 TFT redo: SPI{spi_port}.{spi_device}, DC=GPIO{gpio_dc}, RST=GPIO{gpio_rst}")
