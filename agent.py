@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Hanson v3 - agent.py (steg 1: knapp + LED)
-Custom AudioInterface för ReSpeaker (card 1) + USB-högtalare (card 2)
+Custom AudioInterface för ReSpeaker (index 1) + USB-högtalare (index 2)
+Konverterar ElevenLabs 16kHz mono → 48kHz stereo för USB-högtalare
 """
 
 import os
@@ -10,6 +11,7 @@ import time
 import threading
 import logging
 import queue
+import audioop
 
 import pyaudio
 
@@ -55,16 +57,20 @@ LED_COUNT  = 16
 BUTTON_PIN = 17
 PIR_PIN    = 27
 
-# Audio-enheter (index från PyAudio)
-INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array (hw:2,0)
-OUTPUT_DEVICE = 2   # USB-högtalare (hw:3,0)
+# Audio-enheter
+INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array
+OUTPUT_DEVICE = 2   # USB-högtalare
 
+ELEVENLABS_RATE = 16000   # ElevenLabs skickar alltid 16kHz mono
 SAMPLE_RATE_IN  = 16000   # ReSpeaker native
 SAMPLE_RATE_OUT = 48000   # USB-högtalare native
-CHANNELS_IN     = 6       # ReSpeaker har 6 kanaler
+CHANNELS_IN     = 6       # ReSpeaker 4 Mic Array har 6 kanaler
 CHANNELS_OUT    = 2       # Stereo ut
 CHUNK           = 1024
 FORMAT          = pyaudio.paInt16
+
+# State för audioop.ratecv (behöver sparas mellan anrop)
+_ratecv_state   = None
 
 PIR_COOLDOWN_AFTER_END = 10.0
 
@@ -73,24 +79,27 @@ PIR_COOLDOWN_AFTER_END = 10.0
 class HansonAudioInterface(AudioInterface):
     """
     Custom AudioInterface:
-      Input  → ReSpeaker 4 Mic Array (index 1, 6ch, 16kHz)
-      Output → USB-högtalare (index 2, 2ch, 48kHz)
+      Input  → ReSpeaker (index 1, 6ch, 16kHz) — skickar kanal 0 till ElevenLabs
+      Output → USB-högtalare (index 2, 2ch, 48kHz) — konverterar från 16kHz mono
     """
 
     def __init__(self):
-        self.p           = pyaudio.PyAudio()
-        self.in_stream   = None
-        self.out_stream  = None
-        self._out_queue  = queue.Queue()
-        self._out_thread = None
-        self._running    = False
+        self.p            = pyaudio.PyAudio()
+        self.in_stream    = None
+        self.out_stream   = None
+        self._out_queue   = queue.Queue()
+        self._out_thread  = None
+        self._running     = False
+        self._ratecv_state = None
 
     def start(self, input_callback):
         self._running = True
 
         # ── Input: ReSpeaker ──────────────────────────────────────────────
         def _in_callback(in_data, frame_count, time_info, status):
-            input_callback(in_data)
+            # ReSpeaker ger 6 kanaler interleaved — extrahera bara kanal 0 (mono)
+            mono = audioop.tomono(in_data, 2, 1, 0)
+            input_callback(mono)
             return (None, pyaudio.paContinue)
 
         self.in_stream = self.p.open(
@@ -113,7 +122,6 @@ class HansonAudioInterface(AudioInterface):
             frames_per_buffer=CHUNK,
         )
 
-        # Output-tråd
         self._out_thread = threading.Thread(target=self._output_loop, daemon=True)
         self._out_thread.start()
 
@@ -151,9 +159,18 @@ class HansonAudioInterface(AudioInterface):
             self.out_stream = None
 
     def output(self, audio: bytes):
-        self._out_queue.put(audio)
+        # ElevenLabs skickar 16kHz mono PCM16
+        # Steg 1: Resample 16kHz → 48kHz
+        converted, self._ratecv_state = audioop.ratecv(
+            audio, 2, 1, ELEVENLABS_RATE, SAMPLE_RATE_OUT, self._ratecv_state
+        )
+        # Steg 2: Mono → Stereo
+        stereo = audioop.tostereo(converted, 2, 1, 1)
+        self._out_queue.put(stereo)
 
     def interrupt(self):
+        # Töm kön och återställ resample-state vid avbrott
+        self._ratecv_state = None
         while not self._out_queue.empty():
             try:
                 self._out_queue.get_nowait()
@@ -470,9 +487,9 @@ class RaspberryPiAgent:
 
     def run(self):
         print()
-        print("=" * 48)
+        print("=" * 52)
         print("  Hanson v3 – Steg 1: Knapp + LED")
-        print("=" * 48)
+        print("=" * 52)
         print(f"  Input  : index {INPUT_DEVICE} (ReSpeaker, {SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch)")
         print(f"  Output : index {OUTPUT_DEVICE} (USB-högtalare, {SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
         print(f"  Knapp  : GPIO {BUTTON_PIN}")
