@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
 Hanson v3 - agent.py (steg 1: knapp + LED)
-ElevenLabs Conversational AI Agent för Raspberry Pi 5
-
-Hårdvara:
-  WS2812B LED-ring  → GPIO 10 / SPI0 MOSI (Pin 19)  via Pi5Neo
-  Knapp             → GPIO 17 (Pin 11)               via lgpio
-  PIR HC-SR501      → GPIO 27 (Pin 13)               via lgpio
-
-Installation i venv:
-  pip install elevenlabs python-dotenv pi5neo lgpio
+Custom AudioInterface för ReSpeaker (card 2) + USB-högtalare (card 3)
 """
 
 import os
@@ -17,7 +9,10 @@ import sys
 import time
 import threading
 import logging
+import queue
 from contextlib import contextmanager
+
+import pyaudio
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import (
@@ -25,8 +20,8 @@ from elevenlabs.conversational_ai.conversation import (
     ConversationInitiationData,
     ClientTools,
     AgentChatResponsePartType,
+    AudioInterface,
 )
-from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,18 +32,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("hanson")
-
-@contextmanager
-def suppress_alsa_errors():
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    old_stderr = os.dup(2)
-    os.dup2(devnull, 2)
-    os.close(devnull)
-    try:
-        yield
-    finally:
-        os.dup2(old_stderr, 2)
-        os.close(old_stderr)
 
 # ── GPIO ───────────────────────────────────────────────────────────────────────
 try:
@@ -73,7 +56,113 @@ LED_COUNT  = 16
 BUTTON_PIN = 17
 PIR_PIN    = 27
 
-PIR_COOLDOWN_AFTER_END = 8.0
+# ALSA card-index — justera om USB-enheter byter ordning vid reboot
+INPUT_CARD  = 2   # ReSpeaker 4 Mic Array
+OUTPUT_CARD = 3   # USB-högtalare
+
+SAMPLE_RATE   = 16000
+CHANNELS_IN   = 1
+CHANNELS_OUT  = 1
+CHUNK         = 1024
+FORMAT        = pyaudio.paInt16
+
+PIR_COOLDOWN_AFTER_END = 10.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+class HansonAudioInterface(AudioInterface):
+    """
+    Custom AudioInterface som explicit använder:
+      Input  → ALSA card 2 (ReSpeaker 4 Mic Array)
+      Output → ALSA card 3 (USB-högtalare)
+    """
+
+    def __init__(self):
+        self.p          = pyaudio.PyAudio()
+        self.in_stream  = None
+        self.out_stream = None
+        self._out_queue = queue.Queue()
+        self._out_thread = None
+        self._running   = False
+
+    def start(self, input_callback):
+        self._running = True
+
+        # Input: ReSpeaker
+        self.in_stream = self.p.open(
+            format=FORMAT,
+            channels=CHANNELS_IN,
+            rate=SAMPLE_RATE,
+            input=True,
+            input_device_index=INPUT_CARD,
+            frames_per_buffer=CHUNK,
+            stream_callback=lambda in_data, frame_count, time_info, status: (
+                input_callback(in_data),
+                pyaudio.paContinue,
+            )[1],
+        )
+
+        # Output: USB-högtalare
+        self.out_stream = self.p.open(
+            format=FORMAT,
+            channels=CHANNELS_OUT,
+            rate=SAMPLE_RATE,
+            output=True,
+            output_device_index=OUTPUT_CARD,
+            frames_per_buffer=CHUNK,
+        )
+
+        # Output-tråd
+        self._out_thread = threading.Thread(target=self._output_loop, daemon=True)
+        self._out_thread.start()
+
+        log.info(f"Audio: input=card{INPUT_CARD} output=card{OUTPUT_CARD}")
+
+    def _output_loop(self):
+        while self._running:
+            try:
+                chunk = self._out_queue.get(timeout=0.1)
+                if self.out_stream and self.out_stream.is_active():
+                    self.out_stream.write(chunk)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                log.debug(f"Output-fel: {e}")
+
+    def stop(self):
+        self._running = False
+        if self._out_thread:
+            self._out_thread.join(timeout=2.0)
+        if self.in_stream:
+            try:
+                self.in_stream.stop_stream()
+                self.in_stream.close()
+            except Exception:
+                pass
+        if self.out_stream:
+            try:
+                self.out_stream.stop_stream()
+                self.out_stream.close()
+            except Exception:
+                pass
+
+    def output(self, audio: bytes):
+        self._out_queue.put(audio)
+
+    def interrupt(self):
+        # Töm output-kön vid avbrott
+        while not self._out_queue.empty():
+            try:
+                self._out_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def cleanup(self):
+        self.stop()
+        try:
+            self.p.terminate()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,13 +315,13 @@ class RaspberryPiAgent:
         self.client              = ElevenLabs(api_key=ELEVENLABS_API_KEY)
         self.led                 = LEDController()
         self.gpio_chip           = None
-        self.audio_interface     = None
         self.conversation        = None
         self.conversation_active = False
         self._last_session_end   = 0.0
+        self._session_lock       = threading.Lock()
 
         self._setup_gpio()
-        self._setup_audio()
+        self._verify_audio()
 
     def _setup_gpio(self):
         if not GPIO_AVAILABLE:
@@ -246,16 +335,24 @@ class RaspberryPiAgent:
             log.error(f"GPIO-fel: {e}")
             self.gpio_chip = None
 
-    def _setup_audio(self):
-        log.info("Initierar audio interface…")
+    def _verify_audio(self):
+        """Verifiera att rätt ljudenheter finns innan vi startar."""
+        p = pyaudio.PyAudio()
         try:
-            with suppress_alsa_errors():
-                self.audio_interface = DefaultAudioInterface()
-            time.sleep(2.5)
-            log.info("Audio interface redo")
-        except Exception as e:
-            log.error(f"Audio-fel: {e}")
-            self.audio_interface = None
+            count = p.get_device_count()
+            log.info(f"PyAudio: {count} ljudenheter hittade")
+            if INPUT_CARD < count:
+                d = p.get_device_info_by_index(INPUT_CARD)
+                log.info(f"Input  (card {INPUT_CARD}): {d['name']}")
+            else:
+                log.warning(f"Input card {INPUT_CARD} finns inte!")
+            if OUTPUT_CARD < count:
+                d = p.get_device_info_by_index(OUTPUT_CARD)
+                log.info(f"Output (card {OUTPUT_CARD}): {d['name']}")
+            else:
+                log.warning(f"Output card {OUTPUT_CARD} finns inte!")
+        finally:
+            p.terminate()
 
     def _build_client_tools(self) -> ClientTools:
         ct = ClientTools()
@@ -271,7 +368,7 @@ class RaspberryPiAgent:
         log.info(f"Agent: {response}")
 
     def _on_agent_response_correction(self, original: str, corrected: str):
-        log.info(f"Agent (korrigering): '{original[:40]}' → '{corrected[:40]}'")
+        log.info(f"Agent (korrigering): '{original[:40]}'")
 
     def _on_agent_chat_response_part(self, text: str, part_type: AgentChatResponsePartType):
         if part_type == AgentChatResponsePartType.START:
@@ -288,19 +385,20 @@ class RaspberryPiAgent:
         self._cleanup_after_session()
 
     def _cleanup_after_session(self):
-        self.conversation_active = False
-        self._last_session_end   = time.time()
+        with self._session_lock:
+            self.conversation_active = False
+            self._last_session_end   = time.time()
         self.led.stop_effect()
         self.led.pulse_once(LEDController.ENDING)
         log.info("Redo för nästa konversation")
 
     def start_conversation(self, trigger: str = "knapp"):
-        if self.conversation_active:
-            return
-        if not self.audio_interface:
-            log.error("Audio interface saknas")
-            self.led.pulse_once(LEDController.ERROR)
-            return
+        with self._session_lock:
+            if self.conversation_active:
+                return
+            self.conversation_active = True   # Sätt direkt för att blockera dubbel-trigger
+
+        audio = HansonAudioInterface()
 
         try:
             log.info(f"Startar konversation (trigger: {trigger})…")
@@ -310,7 +408,7 @@ class RaspberryPiAgent:
                 client=self.client,
                 agent_id=AGENT_ID,
                 requires_auth=True,
-                audio_interface=self.audio_interface,
+                audio_interface=audio,
                 config=ConversationInitiationData(),
                 client_tools=self._build_client_tools(),
                 callback_user_transcript=self._on_user_transcript,
@@ -322,7 +420,6 @@ class RaspberryPiAgent:
             )
 
             self.conversation.start_session()
-            self.conversation_active = True
             self.conversation.send_contextual_update(
                 f"Konversationen startades via {trigger}. Hälsa besökaren välkommen på svenska."
             )
@@ -332,11 +429,15 @@ class RaspberryPiAgent:
         except Exception as e:
             log.error(f"Startfel: {e}")
             self.led.pulse_once(LEDController.ERROR)
-            self.conversation_active = False
+            with self._session_lock:
+                self.conversation_active = False
+            audio.cleanup()
 
     def end_conversation(self):
-        if not self.conversation_active:
-            return
+        with self._session_lock:
+            if not self.conversation_active:
+                return
+
         log.info("Avslutar konversation…")
         try:
             if self.conversation:
@@ -374,18 +475,12 @@ class RaspberryPiAgent:
         print("=" * 48)
         print("  Hanson v3 – Steg 1: Knapp + LED")
         print("=" * 48)
-        print(f"  Knapp : GPIO {BUTTON_PIN} — starta/stoppa")
-        print(f"  PIR   : GPIO {PIR_PIN}   — rörelsestart")
+        print(f"  Input  : card {INPUT_CARD} (ReSpeaker)")
+        print(f"  Output : card {OUTPUT_CARD} (USB-högtalare)")
+        print(f"  Knapp  : GPIO {BUTTON_PIN}")
+        print(f"  PIR    : GPIO {PIR_PIN}")
         print()
-        print("  LED-status:")
-        print("   Röd→Grön→Blå puls  = Startar upp")
-        print("   Grön puls          = Konversation startar")
-        print("   Blå/Cyan solid     = Lyssnar")
-        print("   Orange spinner     = Tänker")
-        print("   Lila puls          = Agenten pratar")
-        print("   Orange puls        = Avslutar")
-        print("   Röd puls           = Fel")
-        print()
+        print("  Tryck knappen eller rör dig framför PIR")
         print("  Ctrl+C för att avsluta")
         print()
 
