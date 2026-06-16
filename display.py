@@ -47,7 +47,7 @@ BGDARK  = "#0A0A0A"    # Nästan svart bakgrund
 # ── Försök importera luma.lcd ──────────────────────────────────────────────────
 try:
     from luma.core.interface.serial import spi
-    from luma.lcd.device import st7735
+    from luma.lcd.device import st7789
     from luma.core.render import canvas
     from PIL import ImageFont, ImageDraw, Image
     DISPLAY_AVAILABLE = True
@@ -153,7 +153,7 @@ class TFTDisplay:
                 gpio_RST=gpio_rst,
                 bus_speed_hz=32_000_000,   # 32MHz — snabbt men stabilt
             )
-            self.device = st7735(
+            self.device = st7789(
                 serial,
                 width=self.W,
                 height=self.H,
