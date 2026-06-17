@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Hanson v3 - agent.py (steg 1: knapp + LED)
-Custom AudioInterface för ReSpeaker (index 1) + USB-högtalare (index 2)
-Konverterar ElevenLabs 16kHz mono → 48kHz stereo för USB-högtalare
+Audio via sounddevice + numpy/scipy (modern, framtidssäker stack)
+
+Input  → ReSpeaker 4 Mic Array (index 1, 6ch, 16kHz) → kanal 0 → ElevenLabs
+Output → ElevenLabs (16kHz mono) → resample → USB-högtalare (index 2, 48kHz stereo)
 """
 
 import os
@@ -11,9 +13,10 @@ import time
 import threading
 import logging
 import queue
-import audioop
 
-import pyaudio
+import numpy as np
+import sounddevice as sd
+from scipy.signal import resample_poly
 
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import (
@@ -57,20 +60,16 @@ LED_COUNT  = 16
 BUTTON_PIN = 17
 PIR_PIN    = 27
 
-# Audio-enheter
+# Audio-enheter (sounddevice device-index, ej samma som PyAudio nödvändigtvis)
 INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array
 OUTPUT_DEVICE = 2   # USB-högtalare
 
-ELEVENLABS_RATE = 16000   # ElevenLabs skickar alltid 16kHz mono
-SAMPLE_RATE_IN  = 16000   # ReSpeaker native
-SAMPLE_RATE_OUT = 48000   # USB-högtalare native
-CHANNELS_IN     = 6       # ReSpeaker 4 Mic Array har 6 kanaler
-CHANNELS_OUT    = 2       # Stereo ut
-CHUNK           = 1024
-FORMAT          = pyaudio.paInt16
-
-# State för audioop.ratecv (behöver sparas mellan anrop)
-_ratecv_state   = None
+ELEVENLABS_RATE = 16000   # ElevenLabs skickar/förväntar alltid 16kHz mono PCM16
+HW_RATE_IN      = 16000   # ReSpeaker native sample rate
+HW_RATE_OUT     = 48000   # USB-högtalare native sample rate
+CHANNELS_IN     = 6       # ReSpeaker har 6 kanaler, vi använder kanal 0
+CHANNELS_OUT    = 2       # USB-högtalare stereo
+BLOCKSIZE       = 1024
 
 PIR_COOLDOWN_AFTER_END = 10.0
 
@@ -78,62 +77,62 @@ PIR_COOLDOWN_AFTER_END = 10.0
 # ══════════════════════════════════════════════════════════════════════════════
 class HansonAudioInterface(AudioInterface):
     """
-    Custom AudioInterface:
-      Input  → ReSpeaker (index 1, 6ch, 16kHz) — skickar kanal 0 till ElevenLabs
-      Output → USB-högtalare (index 2, 2ch, 48kHz) — konverterar från 16kHz mono
+    Modern AudioInterface via sounddevice/numpy/scipy.
+
+    Input:  ReSpeaker (6ch int16 @16kHz) → kanal 0 extraheras → bytes till ElevenLabs
+    Output: ElevenLabs (mono int16 @16kHz) → resample_poly → 48kHz → duplicera till stereo
     """
 
     def __init__(self):
-        self.p            = pyaudio.PyAudio()
-        self.in_stream    = None
-        self.out_stream   = None
-        self._out_queue   = queue.Queue()
-        self._out_thread  = None
-        self._running     = False
-        self._ratecv_state = None
+        self.in_stream   = None
+        self.out_stream  = None
+        self._out_queue  = queue.Queue()
+        self._out_thread = None
+        self._running    = False
 
     def start(self, input_callback):
         self._running = True
 
-        # ── Input: ReSpeaker ──────────────────────────────────────────────
-        def _in_callback(in_data, frame_count, time_info, status):
-            # ReSpeaker ger 6 kanaler interleaved — extrahera bara kanal 0 (mono)
-            mono = audioop.tomono(in_data, 2, 1, 0)
-            input_callback(mono)
-            return (None, pyaudio.paContinue)
+        # ── Input callback ──────────────────────────────────────────────
+        def _in_callback(indata, frames, time_info, status):
+            if status:
+                log.debug(f"Input status: {status}")
+            # indata: shape (frames, CHANNELS_IN), dtype int16
+            mono = indata[:, 0].copy()          # Kanal 0 från ReSpeaker
+            input_callback(mono.tobytes())
 
-        self.in_stream = self.p.open(
-            format=FORMAT,
+        self.in_stream = sd.InputStream(
+            device=INPUT_DEVICE,
             channels=CHANNELS_IN,
-            rate=SAMPLE_RATE_IN,
-            input=True,
-            input_device_index=INPUT_DEVICE,
-            frames_per_buffer=CHUNK,
-            stream_callback=_in_callback,
+            samplerate=HW_RATE_IN,
+            dtype="int16",
+            blocksize=BLOCKSIZE,
+            callback=_in_callback,
         )
+        self.in_stream.start()
 
-        # ── Output: USB-högtalare ─────────────────────────────────────────
-        self.out_stream = self.p.open(
-            format=FORMAT,
+        # ── Output stream ───────────────────────────────────────────────
+        self.out_stream = sd.OutputStream(
+            device=OUTPUT_DEVICE,
             channels=CHANNELS_OUT,
-            rate=SAMPLE_RATE_OUT,
-            output=True,
-            output_device_index=OUTPUT_DEVICE,
-            frames_per_buffer=CHUNK,
+            samplerate=HW_RATE_OUT,
+            dtype="int16",
+            blocksize=BLOCKSIZE,
         )
+        self.out_stream.start()
 
         self._out_thread = threading.Thread(target=self._output_loop, daemon=True)
         self._out_thread.start()
 
-        log.info(f"Audio: input=index{INPUT_DEVICE} ({SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch) "
-                 f"output=index{OUTPUT_DEVICE} ({SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
+        log.info(f"Audio: input=device{INPUT_DEVICE} ({HW_RATE_IN}Hz {CHANNELS_IN}ch) "
+                 f"output=device{OUTPUT_DEVICE} ({HW_RATE_OUT}Hz {CHANNELS_OUT}ch)")
 
     def _output_loop(self):
         while self._running:
             try:
-                chunk = self._out_queue.get(timeout=0.1)
-                if self.out_stream and self.out_stream.is_active():
-                    self.out_stream.write(chunk)
+                stereo_chunk = self._out_queue.get(timeout=0.1)
+                if self.out_stream:
+                    self.out_stream.write(stereo_chunk)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -145,32 +144,37 @@ class HansonAudioInterface(AudioInterface):
             self._out_thread.join(timeout=2.0)
         if self.in_stream:
             try:
-                self.in_stream.stop_stream()
+                self.in_stream.stop()
                 self.in_stream.close()
             except Exception:
                 pass
             self.in_stream = None
         if self.out_stream:
             try:
-                self.out_stream.stop_stream()
+                self.out_stream.stop()
                 self.out_stream.close()
             except Exception:
                 pass
             self.out_stream = None
 
     def output(self, audio: bytes):
-        # ElevenLabs skickar 16kHz mono PCM16
-        # Steg 1: Resample 16kHz → 48kHz
-        converted, self._ratecv_state = audioop.ratecv(
-            audio, 2, 1, ELEVENLABS_RATE, SAMPLE_RATE_OUT, self._ratecv_state
-        )
-        # Steg 2: Mono → Stereo
-        stereo = audioop.tostereo(converted, 2, 1, 1)
+        """
+        Tar emot 16kHz mono PCM16 från ElevenLabs.
+        Resamplar till 48kHz och duplicerar till stereo.
+        """
+        mono16k = np.frombuffer(audio, dtype=np.int16)
+
+        # Resample 16kHz → 48kHz (3x upsampling, exakt heltalsförhållande)
+        # resample_poly är polyphase-baserad: hög kvalitet, ingen state behövs
+        mono48k = resample_poly(mono16k, up=3, down=1).astype(np.int16)
+
+        # Mono → Stereo (duplicera till båda kanaler)
+        stereo = np.column_stack((mono48k, mono48k))
+
         self._out_queue.put(stereo)
 
     def interrupt(self):
-        # Töm kön och återställ resample-state vid avbrott
-        self._ratecv_state = None
+        """Töm output-kön omedelbart vid avbrott (t.ex. användaren börjar prata)."""
         while not self._out_queue.empty():
             try:
                 self._out_queue.get_nowait()
@@ -179,10 +183,6 @@ class HansonAudioInterface(AudioInterface):
 
     def cleanup(self):
         self.stop()
-        try:
-            self.p.terminate()
-        except Exception:
-            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -356,18 +356,17 @@ class RaspberryPiAgent:
             self.gpio_chip = None
 
     def _verify_audio(self):
-        p = pyaudio.PyAudio()
         try:
-            count = p.get_device_count()
+            devices = sd.query_devices()
             for idx, label in [(INPUT_DEVICE, "Input"), (OUTPUT_DEVICE, "Output")]:
-                if idx < count:
-                    d = p.get_device_info_by_index(idx)
-                    log.info(f"{label} (index {idx}): {d['name']} "
-                             f"in:{d['maxInputChannels']} out:{d['maxOutputChannels']}")
+                if idx < len(devices):
+                    d = devices[idx]
+                    log.info(f"{label} (device {idx}): {d['name']} "
+                             f"in:{d['max_input_channels']} out:{d['max_output_channels']}")
                 else:
-                    log.warning(f"{label} index {idx} finns inte!")
-        finally:
-            p.terminate()
+                    log.warning(f"{label} device {idx} finns inte!")
+        except Exception as e:
+            log.error(f"Audio-verifieringsfel: {e}")
 
     def _build_client_tools(self) -> ClientTools:
         ct = ClientTools()
@@ -490,8 +489,8 @@ class RaspberryPiAgent:
         print("=" * 52)
         print("  Hanson v3 – Steg 1: Knapp + LED")
         print("=" * 52)
-        print(f"  Input  : index {INPUT_DEVICE} (ReSpeaker, {SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch)")
-        print(f"  Output : index {OUTPUT_DEVICE} (USB-högtalare, {SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
+        print(f"  Input  : device {INPUT_DEVICE} (ReSpeaker, {HW_RATE_IN}Hz {CHANNELS_IN}ch)")
+        print(f"  Output : device {OUTPUT_DEVICE} (USB-högtalare, {HW_RATE_OUT}Hz {CHANNELS_OUT}ch)")
         print(f"  Knapp  : GPIO {BUTTON_PIN}")
         print(f"  PIR    : GPIO {PIR_PIN}")
         print()
