@@ -178,6 +178,10 @@ class HansonAudioInterface(AudioInterface):
         with self._buffer_lock:
             self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
 
+    def output_buffer_empty(self) -> bool:
+        with self._buffer_lock:
+            return len(self._out_buffer) == 0
+
     def cleanup(self):
         self.stop()
 
@@ -389,15 +393,30 @@ class RaspberryPiAgent:
                 self._current_audio.mic_muted = True
         elif part_type == AgentChatResponsePartType.STOP:
             if self._current_audio:
-                # Liten fördröjning så att sista ljudet hinner ut ur högtalaren
-                # innan vi slår på mikrofonen igen (ekoskydd för svansen av ljudet)
-                threading.Timer(0.4, self._unmute_mic).start()
+                threading.Thread(target=self._unmute_when_silent, daemon=True).start()
             if self.conversation_active:
                 self.led.start_listening()
 
-    def _unmute_mic(self):
-        if self._current_audio:
-            self._current_audio.mic_muted = False
+    def _unmute_when_silent(self):
+        """
+        Väntar tills output-bufferten faktiskt är tom (allt ljud uppspelat),
+        plus en säkerhetsmarginal för rumseko, innan mikrofonen slås på igen.
+        """
+        audio = self._current_audio
+        if not audio:
+            return
+
+        # Vänta tills bufferten är tom (max 10s säkerhetsgräns)
+        waited = 0.0
+        while not audio.output_buffer_empty() and waited < 10.0:
+            time.sleep(0.05)
+            waited += 0.05
+
+        # Extra marginal för rummets efterklang/eko att klinga av
+        time.sleep(1.2)
+
+        if audio:
+            audio.mic_muted = False
 
     def _on_latency(self, latency_ms: int):
         log.info(f"Latens: {latency_ms}ms")
