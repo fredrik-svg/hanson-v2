@@ -70,7 +70,8 @@ CHANNELS_IN     = 6       # ReSpeaker har 6 kanaler, vi använder kanal 0
 CHANNELS_OUT    = 2       # USB-högtalare stereo
 BLOCKSIZE       = 1024
 
-PIR_COOLDOWN_AFTER_END = 10.0
+PIR_COOLDOWN_AFTER_END   = 10.0
+MAX_CONVERSATION_SECONDS = 300.0   # Watchdog: tvinga avslut efter 5 min oavsett
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -177,6 +178,21 @@ class HansonAudioInterface(AudioInterface):
         """Töm output-bufferten omedelbart vid avbrott."""
         with self._buffer_lock:
             self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
+
+    def samples_remaining(self) -> int:
+        """Antal samples (frames) som ännu inte spelats ut av högtalaren."""
+        with self._buffer_lock:
+            return len(self._out_buffer)
+
+    def seconds_remaining(self) -> float:
+        """
+        Exakt återstående speltid i sekunder: vår egen kö-buffer plus
+        PortAudios rapporterade output-latens (hårdvarubufferten).
+        Detta är deterministiskt — ingen gissning, bara aritmetik.
+        """
+        queued_seconds = self.samples_remaining() / HW_RATE_OUT
+        hw_latency = self.out_stream.latency if self.out_stream else 0.0
+        return queued_seconds + hw_latency
 
     def output_buffer_empty(self) -> bool:
         with self._buffer_lock:
@@ -339,6 +355,8 @@ class RaspberryPiAgent:
         self.conversation        = None
         self.conversation_active = False
         self._current_audio      = None
+        self._mute_generation    = 0
+        self._session_started_at = 0.0
         self._last_session_end   = 0.0
         self._session_lock       = threading.Lock()
 
@@ -377,53 +395,108 @@ class RaspberryPiAgent:
         return ct
 
     def _on_user_transcript(self, transcript: str):
-        log.info(f"Användare: {transcript}")
-        self.led.start_thinking()
+        try:
+            log.info(f"Användare: {transcript}")
+            self.led.start_thinking()
+        except Exception as e:
+            log.error(f"Fel i _on_user_transcript: {e}", exc_info=True)
 
     def _on_agent_response(self, response: str):
-        log.info(f"Agent: {response}")
+        try:
+            log.info(f"Agent: {response}")
+        except Exception as e:
+            log.error(f"Fel i _on_agent_response: {e}", exc_info=True)
 
     def _on_agent_response_correction(self, original: str, corrected: str):
-        log.info(f"Agent (korrigering): '{original[:40]}'")
+        try:
+            log.info(f"Agent (korrigering): '{original[:40]}'")
+        except Exception as e:
+            log.error(f"Fel i _on_agent_response_correction: {e}", exc_info=True)
 
     def _on_agent_chat_response_part(self, text: str, part_type: AgentChatResponsePartType):
-        if part_type == AgentChatResponsePartType.START:
-            self.led.start_agent_speaking()
-            if self._current_audio:
-                self._current_audio.mic_muted = True
-        elif part_type == AgentChatResponsePartType.STOP:
-            if self._current_audio:
-                threading.Thread(target=self._unmute_when_silent, daemon=True).start()
-            if self.conversation_active:
-                self.led.start_listening()
+        try:
+            if part_type == AgentChatResponsePartType.START:
+                self._mute_generation += 1
+                self.led.start_agent_speaking()
+                if self._current_audio:
+                    self._current_audio.mic_muted = True
+                    log.debug(f"Mic MUTED (gen={self._mute_generation})")
+            elif part_type == AgentChatResponsePartType.STOP:
+                if self._current_audio:
+                    my_gen = self._mute_generation
+                    threading.Thread(
+                        target=self._unmute_when_silent, args=(my_gen,), daemon=True
+                    ).start()
+                if self.conversation_active:
+                    self.led.start_listening()
+        except Exception as e:
+            log.error(f"Fel i _on_agent_chat_response_part: {e}", exc_info=True)
+            # Failsafe: om något går snett, se till att mikrofonen inte fastnar muted
+            try:
+                if self._current_audio:
+                    self._current_audio.mic_muted = False
+            except Exception:
+                pass
 
-    def _unmute_when_silent(self):
+    def _unmute_when_silent(self, my_gen: int):
         """
-        Väntar tills output-bufferten faktiskt är tom (allt ljud uppspelat),
-        plus en säkerhetsmarginal för rumseko, innan mikrofonen slås på igen.
+        Pollar 'seconds_remaining' kontinuerligt (eftersom mer ljud kan strömma
+        in från ElevenLabs medan vi väntar) tills den faktiskt når noll, plus
+        en liten säkerhetsmarginal för rumseko. Slår sedan på mikrofonen igen
+        — om inget nytt yttrande hunnit börja under tiden (generation-check).
+
+        Hela kroppen är skyddad av try/except: detta körs i en daemon-tråd
+        och en okontrollerad exception här ska aldrig kunna låsa mikrofonen
+        i muted-läge permanent för resten av entréns drifttid.
         """
-        audio = self._current_audio
-        if not audio:
-            return
+        try:
+            audio = self._current_audio
+            if not audio:
+                return
 
-        # Vänta tills bufferten är tom (max 10s säkerhetsgräns)
-        waited = 0.0
-        while not audio.output_buffer_empty() and waited < 10.0:
-            time.sleep(0.05)
-            waited += 0.05
+            max_wait = 15.0
+            waited = 0.0
+            poll_interval = 0.05
 
-        # Extra marginal för rummets efterklang/eko att klinga av
-        time.sleep(1.2)
+            while waited < max_wait:
+                remaining = audio.seconds_remaining()
+                if remaining <= 0.02:
+                    break
+                time.sleep(poll_interval)
+                waited += poll_interval
 
-        if audio:
-            audio.mic_muted = False
+            time.sleep(0.3)
+
+            if my_gen != self._mute_generation:
+                log.debug(f"Unmute avbruten (gen={my_gen} != aktuell={self._mute_generation})")
+                return
+
+            if audio:
+                audio.mic_muted = False
+                log.debug(f"Mic UNMUTED (gen={my_gen}, väntade {waited:.2f}s)")
+
+        except Exception as e:
+            log.error(f"Fel i _unmute_when_silent: {e}", exc_info=True)
+            # Failsafe: även vid oväntat fel, försök slå på mikrofonen igen
+            # hellre än att lämna besökaren i ett dövt läge.
+            try:
+                if self._current_audio:
+                    self._current_audio.mic_muted = False
+            except Exception:
+                pass
 
     def _on_latency(self, latency_ms: int):
         log.info(f"Latens: {latency_ms}ms")
 
     def _on_end_session(self):
-        log.info("Session avslutad")
-        self._cleanup_after_session()
+        try:
+            log.info("Session avslutad (av ElevenLabs eller lokalt)")
+            self._cleanup_after_session()
+        except Exception as e:
+            log.error(f"Fel i _on_end_session: {e}", exc_info=True)
+            # Failsafe: oavsett vad, se till att conversation_active inte fastnar True
+            with self._session_lock:
+                self.conversation_active = False
 
     def _cleanup_after_session(self):
         with self._session_lock:
@@ -461,9 +534,11 @@ class RaspberryPiAgent:
                 callback_end_session=self._on_end_session,
             )
 
+            # start_session() startar en bakgrundstråd. Den blockerar inte,
+            # men om uppkopplingen hänger vill vi inte vänta i evighet senare.
             self.conversation.start_session()
+            self._session_started_at = time.time()
 
-            # Vänta kort så websocket hinner etableras innan vi skickar något
             time.sleep(0.3)
             try:
                 self.conversation.send_contextual_update(
@@ -475,12 +550,60 @@ class RaspberryPiAgent:
             self.led.start_listening()
             log.info("Konversation aktiv!")
 
+            # Starta en watchdog som tvingar igenom cleanup om sessionen
+            # av någon anledning aldrig avslutas korrekt (hängande websocket etc.)
+            self._start_watchdog()
+
         except Exception as e:
-            log.error(f"Startfel: {e}")
+            log.error(f"Startfel: {e}", exc_info=True)
             self.led.pulse_once(LEDController.ERROR)
             with self._session_lock:
                 self.conversation_active = False
-            audio.cleanup()
+            try:
+                audio.cleanup()
+            except Exception:
+                pass
+            self._current_audio = None
+            self.conversation = None
+
+    def _start_watchdog(self):
+        """
+        Säkerhetsnät: om en konversation av någon anledning lever längre än
+        MAX_CONVERSATION_SECONDS (hängande websocket, krasch i callback utan
+        att _on_end_session triggas, etc.) tvingar vi igenom en cleanup så
+        att nästa besökare i entrén inte blockeras på obestämd tid.
+        """
+        def _watchdog():
+            time.sleep(MAX_CONVERSATION_SECONDS)
+            with self._session_lock:
+                still_same_session = self.conversation_active
+            if still_same_session:
+                log.warning(
+                    f"Watchdog: konversation aktiv längre än {MAX_CONVERSATION_SECONDS}s "
+                    f"— tvingar cleanup"
+                )
+                self._force_cleanup()
+
+        threading.Thread(target=_watchdog, daemon=True).start()
+
+    def _force_cleanup(self):
+        """Tvingar igenom full cleanup oavsett state — används av watchdog och felhantering."""
+        try:
+            if self.conversation:
+                try:
+                    self.conversation.end_session()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if self._current_audio:
+                self._current_audio.cleanup()
+        except Exception:
+            pass
+        self._cleanup_after_session()
+        self.conversation   = None
+        self._current_audio = None
 
     def end_conversation(self):
         with self._session_lock:
@@ -491,9 +614,26 @@ class RaspberryPiAgent:
         try:
             if self.conversation:
                 self.conversation.end_session()
-                conversation_id = self.conversation.wait_for_session_end()
-                if conversation_id:
-                    log.info(f"Conversation ID: {conversation_id}")
+
+                # wait_for_session_end() kan i värsta fall hänga om websocket
+                # är i ett konstigt state — körs därför i en separat tråd med
+                # hård timeout så huvudloopen ALDRIG fastnar här.
+                result_holder = {}
+
+                def _wait():
+                    try:
+                        result_holder["id"] = self.conversation.wait_for_session_end()
+                    except Exception as e:
+                        result_holder["error"] = e
+
+                wait_thread = threading.Thread(target=_wait, daemon=True)
+                wait_thread.start()
+                wait_thread.join(timeout=5.0)
+
+                if wait_thread.is_alive():
+                    log.warning("wait_for_session_end() svarade inte inom 5s — fortsätter ändå")
+                elif "id" in result_holder and result_holder["id"]:
+                    log.info(f"Conversation ID: {result_holder['id']}")
         except Exception as e:
             log.warning(f"Avslutsvarning: {e}")
         finally:
@@ -520,6 +660,19 @@ class RaspberryPiAgent:
     def _pir_in_cooldown(self) -> bool:
         return (time.time() - self._last_session_end) < PIR_COOLDOWN_AFTER_END
 
+    def _check_audio_devices_healthy(self) -> bool:
+        """
+        Snabb kontroll att INPUT_DEVICE/OUTPUT_DEVICE fortfarande existerar.
+        USB-ljudenheter på Pi kan ibland tappa anslutning efter lång drift —
+        detta upptäcker det innan nästa besökare drabbas av en tyst krasch.
+        """
+        try:
+            devices = sd.query_devices()
+            return INPUT_DEVICE < len(devices) and OUTPUT_DEVICE < len(devices)
+        except Exception as e:
+            log.error(f"Audio-hälsokontroll misslyckades: {e}")
+            return False
+
     def run(self):
         print()
         print("=" * 52)
@@ -536,9 +689,22 @@ class RaspberryPiAgent:
 
         last_btn      = False
         pir_triggered = False
+        last_health_check = time.time()
+        HEALTH_CHECK_INTERVAL = 60.0   # Kontrollera audio-enheter var 60s
 
         try:
             while True:
+                # ── Periodisk hälsokontroll (bara när ingen konversation pågår) ──
+                now = time.time()
+                if (now - last_health_check) > HEALTH_CHECK_INTERVAL:
+                    last_health_check = now
+                    if not self.conversation_active:
+                        if not self._check_audio_devices_healthy():
+                            log.error(
+                                "Audio-enheter saknas! Kontrollera USB-anslutningar. "
+                                "Hanson kommer fortsätta försöka, men ljud kan saknas."
+                            )
+
                 btn = self._read_button()
                 if btn and not last_btn:
                     if not self.conversation_active:
@@ -582,8 +748,40 @@ class RaspberryPiAgent:
 
 
 def main():
-    agent = RaspberryPiAgent()
-    agent.run()
+    """
+    Yttre skyddsloop: om RaspberryPiAgent kraschar helt oväntat (t.ex. ett
+    odokumenterat SDK-fel som inte fångas av interna try/except), startar
+    vi om hela agenten automatiskt istället för att lämna entrén utan
+    fungerande Hanson. Begränsad omstartsfrekvens för att undvika crash-loop
+    vid ett permanent fel (t.ex. fel API-nyckel).
+    """
+    restart_count = 0
+    max_restarts_per_hour = 10
+    restart_times = []
+
+    while True:
+        try:
+            agent = RaspberryPiAgent()
+            agent.run()
+            break   # run() avslutas bara vid Ctrl+C (os._exit), så detta nås sällan
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            log.error(f"OVÄNTAD KRASCH i huvudprocessen: {e}", exc_info=True)
+
+            now = time.time()
+            restart_times.append(now)
+            restart_times = [t for t in restart_times if now - t < 3600]
+
+            if len(restart_times) > max_restarts_per_hour:
+                log.error(
+                    f"Mer än {max_restarts_per_hour} omstarter senaste timmen — "
+                    f"avbryter för att undvika crash-loop. Kontrollera felet manuellt."
+                )
+                break
+
+            log.warning("Startar om Hanson om 3 sekunder…")
+            time.sleep(3)
 
 
 if __name__ == "__main__":
