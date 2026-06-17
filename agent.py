@@ -88,6 +88,7 @@ class HansonAudioInterface(AudioInterface):
         self._out_buffer  = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
         self._buffer_lock = threading.Lock()
         self._running     = False
+        self.mic_muted    = False   # Sätts True medan agenten pratar
 
     def start(self, input_callback):
         self._running = True
@@ -96,6 +97,8 @@ class HansonAudioInterface(AudioInterface):
         def _in_callback(indata, frames, time_info, status):
             if status:
                 log.debug(f"Input status: {status}")
+            if self.mic_muted:
+                return   # Skicka inget till ElevenLabs medan agenten pratar
             mono = indata[:, 0].copy()
             input_callback(mono.tobytes())
 
@@ -331,6 +334,7 @@ class RaspberryPiAgent:
         self.gpio_chip           = None
         self.conversation        = None
         self.conversation_active = False
+        self._current_audio      = None
         self._last_session_end   = 0.0
         self._session_lock       = threading.Lock()
 
@@ -381,9 +385,19 @@ class RaspberryPiAgent:
     def _on_agent_chat_response_part(self, text: str, part_type: AgentChatResponsePartType):
         if part_type == AgentChatResponsePartType.START:
             self.led.start_agent_speaking()
+            if self._current_audio:
+                self._current_audio.mic_muted = True
         elif part_type == AgentChatResponsePartType.STOP:
+            if self._current_audio:
+                # Liten fördröjning så att sista ljudet hinner ut ur högtalaren
+                # innan vi slår på mikrofonen igen (ekoskydd för svansen av ljudet)
+                threading.Timer(0.4, self._unmute_mic).start()
             if self.conversation_active:
                 self.led.start_listening()
+
+    def _unmute_mic(self):
+        if self._current_audio:
+            self._current_audio.mic_muted = False
 
     def _on_latency(self, latency_ms: int):
         log.info(f"Latens: {latency_ms}ms")
@@ -407,6 +421,7 @@ class RaspberryPiAgent:
             self.conversation_active = True
 
         audio = HansonAudioInterface()
+        self._current_audio = audio
 
         try:
             log.info(f"Startar konversation (trigger: {trigger})…")
@@ -465,6 +480,7 @@ class RaspberryPiAgent:
         finally:
             self._cleanup_after_session()
             self.conversation = None
+            self._current_audio = None
 
     def _read_button(self) -> bool:
         if not self.gpio_chip:
