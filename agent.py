@@ -434,9 +434,16 @@ class RaspberryPiAgent:
             )
 
             self.conversation.start_session()
-            self.conversation.send_contextual_update(
-                f"Konversationen startades via {trigger}. Hälsa besökaren välkommen på svenska."
-            )
+
+            # Vänta kort så websocket hinner etableras innan vi skickar något
+            time.sleep(0.3)
+            try:
+                self.conversation.send_contextual_update(
+                    f"Konversationen startades via {trigger}. Hälsa besökaren välkommen på svenska."
+                )
+            except Exception as e:
+                log.debug(f"Contextual update misslyckades (ofarligt): {e}")
+
             self.led.start_listening()
             log.info("Konversation aktiv!")
 
@@ -506,8 +513,10 @@ class RaspberryPiAgent:
                 btn = self._read_button()
                 if btn and not last_btn:
                     if not self.conversation_active:
+                        log.info("Knapp: startar ny konversation")
                         self.start_conversation(trigger="knapp")
                     else:
+                        log.info("Knapp: avslutar aktiv konversation")
                         self.end_conversation()
                 last_btn = btn
 
@@ -526,6 +535,7 @@ class RaspberryPiAgent:
             print("\nAvslutar…")
         finally:
             self.cleanup()
+            os._exit(0)   # Tvinga total avstängning, inkl. ev. hängande bakgrundstrådar
 
     def cleanup(self):
         if self.conversation_active:
