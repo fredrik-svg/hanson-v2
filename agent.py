@@ -12,7 +12,6 @@ import sys
 import time
 import threading
 import logging
-import queue
 
 import numpy as np
 import sounddevice as sd
@@ -84,11 +83,11 @@ class HansonAudioInterface(AudioInterface):
     """
 
     def __init__(self):
-        self.in_stream   = None
-        self.out_stream  = None
-        self._out_queue  = queue.Queue()
-        self._out_thread = None
-        self._running    = False
+        self.in_stream    = None
+        self.out_stream   = None
+        self._out_buffer  = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
+        self._buffer_lock = threading.Lock()
+        self._running     = False
 
     def start(self, input_callback):
         self._running = True
@@ -97,8 +96,7 @@ class HansonAudioInterface(AudioInterface):
         def _in_callback(indata, frames, time_info, status):
             if status:
                 log.debug(f"Input status: {status}")
-            # indata: shape (frames, CHANNELS_IN), dtype int16
-            mono = indata[:, 0].copy()          # Kanal 0 från ReSpeaker
+            mono = indata[:, 0].copy()
             input_callback(mono.tobytes())
 
         self.in_stream = sd.InputStream(
@@ -111,37 +109,37 @@ class HansonAudioInterface(AudioInterface):
         )
         self.in_stream.start()
 
-        # ── Output stream ───────────────────────────────────────────────
+        # ── Output callback: pull-baserad, alltid synkad med ljudkortets klocka ──
+        def _out_callback(outdata, frames, time_info, status):
+            if status:
+                log.debug(f"Output status: {status}")
+            with self._buffer_lock:
+                available = len(self._out_buffer)
+                if available >= frames:
+                    outdata[:] = self._out_buffer[:frames]
+                    self._out_buffer = self._out_buffer[frames:]
+                elif available > 0:
+                    outdata[:available] = self._out_buffer
+                    outdata[available:] = 0
+                    self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
+                else:
+                    outdata[:] = 0   # Tystnad om bufferten är tom
+
         self.out_stream = sd.OutputStream(
             device=OUTPUT_DEVICE,
             channels=CHANNELS_OUT,
             samplerate=HW_RATE_OUT,
             dtype="int16",
             blocksize=BLOCKSIZE,
+            callback=_out_callback,
         )
         self.out_stream.start()
-
-        self._out_thread = threading.Thread(target=self._output_loop, daemon=True)
-        self._out_thread.start()
 
         log.info(f"Audio: input=device{INPUT_DEVICE} ({HW_RATE_IN}Hz {CHANNELS_IN}ch) "
                  f"output=device{OUTPUT_DEVICE} ({HW_RATE_OUT}Hz {CHANNELS_OUT}ch)")
 
-    def _output_loop(self):
-        while self._running:
-            try:
-                stereo_chunk = self._out_queue.get(timeout=0.1)
-                if self.out_stream:
-                    self.out_stream.write(stereo_chunk)
-            except queue.Empty:
-                continue
-            except Exception as e:
-                log.debug(f"Output-fel: {e}")
-
     def stop(self):
         self._running = False
-        if self._out_thread:
-            self._out_thread.join(timeout=2.0)
         if self.in_stream:
             try:
                 self.in_stream.stop()
@@ -156,30 +154,26 @@ class HansonAudioInterface(AudioInterface):
             except Exception:
                 pass
             self.out_stream = None
+        with self._buffer_lock:
+            self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
 
     def output(self, audio: bytes):
         """
         Tar emot 16kHz mono PCM16 från ElevenLabs.
-        Resamplar till 48kHz och duplicerar till stereo.
+        Resamplar till 48kHz, duplicerar till stereo, lägger i buffer.
+        Output-callbacken plockar därifrån i sin egen takt (ljudkortets klocka).
         """
         mono16k = np.frombuffer(audio, dtype=np.int16)
-
-        # Resample 16kHz → 48kHz (3x upsampling, exakt heltalsförhållande)
-        # resample_poly är polyphase-baserad: hög kvalitet, ingen state behövs
         mono48k = resample_poly(mono16k, up=3, down=1).astype(np.int16)
+        stereo  = np.column_stack((mono48k, mono48k))
 
-        # Mono → Stereo (duplicera till båda kanaler)
-        stereo = np.column_stack((mono48k, mono48k))
-
-        self._out_queue.put(stereo)
+        with self._buffer_lock:
+            self._out_buffer = np.concatenate([self._out_buffer, stereo])
 
     def interrupt(self):
-        """Töm output-kön omedelbart vid avbrott (t.ex. användaren börjar prata)."""
-        while not self._out_queue.empty():
-            try:
-                self._out_queue.get_nowait()
-            except queue.Empty:
-                break
+        """Töm output-bufferten omedelbart vid avbrott."""
+        with self._buffer_lock:
+            self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
 
     def cleanup(self):
         self.stop()
