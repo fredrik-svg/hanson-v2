@@ -102,8 +102,8 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = None   # ← ReSpeaker 4 Mic Array device-index
-OUTPUT_DEVICE = None   # ← Waveshare USB-ljudkort device-index
+INPUT_DEVICE  = 1   # ← ReSpeaker 4 Mic Array device-index
+OUTPUT_DEVICE = 2   # ← Waveshare USB-ljudkort device-index
 
 # Båda enheterna kör nu samma sample rate — ingen konvertering behövs
 SAMPLE_RATE  = 16000
