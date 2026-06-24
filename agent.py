@@ -102,8 +102,8 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = 1   # ← ReSpeaker 4 Mic Array device-index
-OUTPUT_DEVICE = 2   # ← Waveshare USB-ljudkort device-index
+INPUT_DEVICE  = None   # ← ReSpeaker 4 Mic Array device-index
+OUTPUT_DEVICE = None   # ← Waveshare USB-ljudkort device-index
 
 # Båda enheterna kör nu samma sample rate — ingen konvertering behövs
 SAMPLE_RATE  = 16000
@@ -421,7 +421,7 @@ class RaspberryPiAgent:
         try:
             self.gpio_chip = GPIO.gpiochip_open(4)
             GPIO.gpio_claim_input(self.gpio_chip, BUTTON_PIN, GPIO.SET_PULL_UP)
-            GPIO.gpio_claim_input(self.gpio_chip, PIR_PIN,    GPIO.SET_PULL_DOWN)
+            GPIO.gpio_claim_input(self.gpio_chip, PIR_PIN,    GPIO.SET_PULL_UP)
             log.info(f"GPIO: Knapp=GPIO{BUTTON_PIN}, PIR=GPIO{PIR_PIN}")
         except Exception as e:
             log.error(f"GPIO-fel: {e}")
@@ -689,10 +689,15 @@ class RaspberryPiAgent:
             return False
 
     def _read_pir(self) -> bool:
+        """
+        Denna specifika HC-SR501-klon är aktiv-LÅG: vila=1, rörelse=0
+        (omvänt mot standardmodulens aktiv-hög-beteende). Verifierat
+        manuellt med GPIO-test innan koden skrevs.
+        """
         if not self.gpio_chip:
             return False
         try:
-            return GPIO.gpio_read(self.gpio_chip, PIR_PIN) == 1
+            return GPIO.gpio_read(self.gpio_chip, PIR_PIN) == 0
         except Exception:
             return False
 
