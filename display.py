@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-display.py - ST7735 1.77" TFT färgdisplay för Hanson v3
-AZ-Delivery 1.77 Zoll SPI TFT-Display (160x128px, ST7735)
+display.py - OLED SH1106 128x64 statusdisplay för Hanson v3
 
-Koppling (SPI0, CE1 = /dev/spidev0.1):
-  VCC → 3.3V       (Pin 1)
-  GND → GND        (Pin 9)
-  SCK → GPIO 11    (Pin 23)
-  SDA → GPIO 10    (Pin 19)
-  CS  → GPIO 7/CE1 (Pin 26)
-  DC  → GPIO 23    (Pin 16)
-  RES → GPIO 24    (Pin 18)
-  LED → 3.3V       (Pin 1)
+Hårdvara: DollaTek 1.3" OLED (SH1106, I2C, 4-pin)
+Koppling:
+  VCC → 3.3V  (Pin 1)
+  GND → GND   (Pin 6)
+  SCL → GPIO 3 / SCL (Pin 5)
+  SDA → GPIO 2 / SDA (Pin 3)
 
 Installation:
-  pip install luma.lcd pillow --break-system-packages
+  pip install luma.oled pillow --break-system-packages
 
-Aktivera SPI på Pi 5:
-  sudo raspi-config → Interface Options → SPI → Yes
+Aktivera I2C på Pi 5:
+  sudo raspi-config → Interface Options → I2C → Yes
   sudo reboot
 
-Testa:
-  sudo python3 display.py
+Verifiera adress (ska visa 3c):
+  sudo i2cdetect -y 1
 """
 
 import threading
@@ -32,138 +28,91 @@ from enum import Enum, auto
 
 log = logging.getLogger("hanson.display")
 
-# ── Färgpalett ─────────────────────────────────────────────────────────────────
-BLACK   = "black"
-WHITE   = "white"
-GREEN   = "#00FF7F"    # Online / OK
-RED     = "#FF3333"    # Fel / offline
-ORANGE  = "#FF8C00"    # Tänker
-CYAN    = "#00BFFF"    # Lyssnar
-PURPLE  = "#CC44FF"    # Agenten pratar
-YELLOW  = "#FFD700"    # Rörelse
-GRAY    = "#666666"    # Inaktiv text
-BGDARK  = "#0A0A0A"    # Nästan svart bakgrund
-
-# ── Försök importera luma.lcd ──────────────────────────────────────────────────
+# ── Försök importera luma.oled ─────────────────────────────────────────────────
 try:
-    from luma.core.interface.serial import spi
-    from luma.lcd.device import st7789
+    from luma.core.interface.serial import i2c
+    from luma.oled.device import sh1106
     from luma.core.render import canvas
-    from PIL import ImageFont, ImageDraw, Image
     DISPLAY_AVAILABLE = True
 except ImportError:
     DISPLAY_AVAILABLE = False
-    log.warning("luma.lcd saknas. Installera: pip install luma.lcd pillow --break-system-packages")
+    log.warning("luma.oled saknas – display inaktiverad. Installera: pip install luma.oled pillow")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Tillstånd ──────────────────────────────────────────────────────────────────
 class HansonState(Enum):
-    IDLE          = auto()
-    MOTION        = auto()
-    LISTENING     = auto()
-    THINKING      = auto()
-    SPEAKING      = auto()
-    ERROR         = auto()
+    IDLE      = auto()   # Väntar på knapptryck
+    MOTION    = auto()   # Kosmetisk PIR-väckning (ingen session)
+    LISTENING = auto()   # Konversation aktiv, lyssnar
+    THINKING  = auto()   # Agenten bearbetar svar
+    SPEAKING  = auto()   # Agenten pratar
+    ERROR     = auto()   # Fel uppstod
 
 
-# Färg per tillstånd (används för statustext och accent-linje)
-STATE_COLOR = {
-    HansonState.IDLE:      GRAY,
-    HansonState.MOTION:    YELLOW,
-    HansonState.LISTENING: CYAN,
-    HansonState.THINKING:  ORANGE,
-    HansonState.SPEAKING:  PURPLE,
-    HansonState.ERROR:     RED,
-}
-
-STATE_LABEL = {
-    HansonState.IDLE:      "Väntar",
-    HansonState.MOTION:    "Rörelse!",
+STATE_LABELS = {
+    HansonState.IDLE:      "Väntar på knapp",
+    HansonState.MOTION:    "Hej där!",
     HansonState.LISTENING: "Lyssnar",
-    HansonState.THINKING:  "Tänker",
+    HansonState.THINKING:  "Tänker...",
     HansonState.SPEAKING:  "Svarar",
     HansonState.ERROR:     "FEL",
 }
 
-STATE_ICON = {
-    HansonState.IDLE:      "zzz",
-    HansonState.MOTION:    "!!!",
-    HansonState.LISTENING: "MIC",
-    HansonState.THINKING:  " ? ",
-    HansonState.SPEAKING:  ">>>",
-    HansonState.ERROR:     "ERR",
+STATE_ICONS = {
+    HansonState.IDLE:      "[ zzz ]",
+    HansonState.MOTION:    "[  !  ]",
+    HansonState.LISTENING: "[ MIC ]",
+    HansonState.THINKING:  "[  ?  ]",
+    HansonState.SPEAKING:  "[ >>> ]",
+    HansonState.ERROR:     "[ ERR ]",
 }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-class TFTDisplay:
+class OLEDDisplay:
     """
-    Hanterar AZ-Delivery 1.77" ST7735 (160x128px) via luma.lcd.
+    Hanterar SH1106 128x64 OLED-display via I2C.
+    Uppdateras i en bakgrundstråd för att inte blockera konversationslogiken.
 
-    Layout (160x128 px, liggande = portrait 128wide x 160tall):
-    Skärmen monteras stående → 128px bred, 160px hög
-
-    ┌────────────────────┐  y=0
-    │  HANSON   10:42   │  Rubrik
-    ├────────────────────┤  y=20  accent-linje (färgad per state)
-    │  [MIC]  Lyssnar   │  y=26  Ikon + statustext
-    │                   │
-    │  "användaren sa"  │  y=55  Transkription (färgad)
-    │                   │
-    ├────────────────────┤  y=95  separator
-    │ ElevenLabs  ● ON  │  y=100 tjänststatus
-    │ Internet    ● ON  │  y=112 nätverksstatus
-    │           312ms   │  y=124 latens
-    └────────────────────┘  y=160
+    Layout (128x64 px):
+    ┌────────────────────────────┐
+    │ HANSON           15:55    │
+    │ ──────────────────────── │
+    │ [ MIC ]  Lyssnar          │
+    │                           │
+    │ ElevenLabs  ● ONLINE      │
+    │ Internet    ● ONLINE      │
+    └────────────────────────────┘
     """
 
-    W = 128
-    H = 160
-
-    def __init__(self,
-                 spi_port: int = 0,
-                 spi_device: int = 1,
-                 gpio_dc: int = 23,
-                 gpio_rst: int = 24):
+    def __init__(self, i2c_port: int = 1, i2c_address: int = 0x3C):
         self.device          = None
         self._lock           = threading.Lock()
         self._thread         = None
         self._stop           = threading.Event()
         self._dirty          = threading.Event()
-        self._anim_tick      = 0
 
-        # State
-        self.state           = HansonState.IDLE
-        self.last_transcript = ""
-        self.last_latency_ms = 0
-        self.elevenlabs_ok   = False
-        self.internet_ok     = False
+        self.state            = HansonState.IDLE
+        self.last_transcript  = ""
+        self.last_latency_ms  = 0
+        self.elevenlabs_ok    = False
+        self.internet_ok      = False
 
-        self._setup(spi_port, spi_device, gpio_dc, gpio_rst)
+        self._anim_tick = 0
 
-    # ── Setup ──────────────────────────────────────────────────────────────────
-    def _setup(self, spi_port, spi_device, gpio_dc, gpio_rst):
+        self._setup(i2c_port, i2c_address)
+
+    def _setup(self, port: int, address: int):
         if not DISPLAY_AVAILABLE:
             return
         try:
-            serial = spi(
-                port=spi_port,
-                device=spi_device,
-                gpio_DC=gpio_dc,
-                gpio_RST=gpio_rst,
-                bus_speed_hz=32_000_000,   # 32MHz — snabbt men stabilt
-            )
-            self.device = st7789(
-                serial,
-                width=self.W,
-                height=self.H,
-                rotate=0,
-            )
-            log.info(f"ST7735 TFT redo: SPI{spi_port}.{spi_device}, DC=GPIO{gpio_dc}, RST=GPIO{gpio_rst}")
+            serial = i2c(port=port, address=address)
+            self.device = sh1106(serial, width=128, height=64, rotate=0)
+            log.info(f"OLED SH1106 redo på I2C-{port} addr=0x{address:02X}")
             self._start_render_thread()
             self._show_splash()
         except Exception as e:
-            log.error(f"TFT-fel: {e}")
+            log.error(f"OLED-fel: {e}")
             self.device = None
 
     def _start_render_thread(self):
@@ -172,17 +121,15 @@ class TFTDisplay:
 
     # ── Publikt API ────────────────────────────────────────────────────────────
     def set_state(self, state: HansonState):
+        if state is None:
+            return
         if self.state != state:
             self.state = state
             self._anim_tick = 0
             self._dirty.set()
 
     def set_transcript(self, text: str):
-        # Dela upp i två rader om texten är lång (max ~16 tecken per rad vid liten font)
-        if len(text) > 18:
-            self.last_transcript = text[:18] + "…"
-        else:
-            self.last_transcript = text
+        self.last_transcript = text[:22] + "…" if len(text) > 22 else text
         self._dirty.set()
 
     def set_latency(self, ms: int):
@@ -200,9 +147,6 @@ class TFTDisplay:
             self._thread.join(timeout=1.0)
         if self.device:
             try:
-                # Svart skärm vid avstängning
-                with canvas(self.device) as draw:
-                    draw.rectangle([(0,0),(self.W, self.H)], fill=BLACK)
                 self.device.cleanup()
             except Exception:
                 pass
@@ -210,7 +154,7 @@ class TFTDisplay:
     # ── Rendering ──────────────────────────────────────────────────────────────
     def _render_loop(self):
         while not self._stop.is_set():
-            triggered = self._dirty.wait(timeout=1.0)
+            self._dirty.wait(timeout=1.0)
             self._dirty.clear()
             if self._stop.is_set():
                 break
@@ -221,64 +165,38 @@ class TFTDisplay:
         if not self.device:
             return
 
-        now        = datetime.now()
-        time_str   = now.strftime("%H:%M")
-        state      = self.state
-        color      = STATE_COLOR.get(state, GRAY)
-        label      = STATE_LABEL.get(state, "")
-        icon       = STATE_ICON.get(state, "   ")
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
 
-        # Animerade prickar för THINKING
-        if state == HansonState.THINKING:
-            dots  = "." * ((self._anim_tick % 3) + 1)
-            label = "Tänker" + dots
+        dots = "." * ((self._anim_tick % 3) + 1) if self.state == HansonState.THINKING else ""
+        icon   = STATE_ICONS.get(self.state, "")
+        status = STATE_LABELS.get(self.state, "")
+        if self.state == HansonState.THINKING:
+            status = "Tänker" + dots
 
-        el_dot   = ("●", GREEN) if self.elevenlabs_ok  else ("○", RED)
-        net_dot  = ("●", GREEN) if self.internet_ok    else ("○", RED)
-        latency  = f"{self.last_latency_ms}ms" if self.last_latency_ms else "---"
+        el_dot  = "●" if self.elevenlabs_ok else "○"
+        net_dot = "●" if self.internet_ok   else "○"
+        latency = f"{self.last_latency_ms}ms" if self.last_latency_ms else "---"
 
         with self._lock:
             try:
                 with canvas(self.device) as draw:
-                    # ── Bakgrund ───────────────────────────────────────────
-                    draw.rectangle([(0, 0), (self.W, self.H)], fill=BGDARK)
+                    draw.text((0, 0),   "HANSON",    fill="white")
+                    draw.text((90, 0),  time_str,    fill="white")
+                    draw.line([(0, 11), (127, 11)], fill="white")
 
-                    # ── Rubrik: HANSON + klocka ────────────────────────────
-                    draw.text((4, 4),      "HANSON", fill=WHITE)
-                    draw.text((88, 4),     time_str,  fill=GRAY)
+                    draw.text((0, 14),  icon,        fill="white")
+                    draw.text((52, 14), status,      fill="white")
 
-                    # ── Accent-linje (färg per state) ──────────────────────
-                    draw.rectangle([(0, 18), (self.W, 20)], fill=color)
-
-                    # ── Ikon-badge ─────────────────────────────────────────
-                    draw.rectangle([(4, 26), (36, 44)], fill=color, outline=color)
-                    draw.text((8, 28), icon, fill=BLACK)
-
-                    # ── Statustext ─────────────────────────────────────────
-                    draw.text((42, 28), label, fill=color)
-
-                    # ── Transkription ──────────────────────────────────────
-                    if self.last_transcript and state in (
-                        HansonState.LISTENING,
-                        HansonState.THINKING,
-                        HansonState.SPEAKING,
+                    if self.last_transcript and self.state in (
+                        HansonState.LISTENING, HansonState.THINKING, HansonState.SPEAKING
                     ):
-                        draw.text((4, 52), self.last_transcript, fill=WHITE)
+                        draw.text((0, 26), self.last_transcript, fill="white")
 
-                    # ── Separator ──────────────────────────────────────────
-                    draw.rectangle([(0, 90), (self.W, 91)], fill="#222222")
-
-                    # ── ElevenLabs-status ──────────────────────────────────
-                    draw.text((4, 95),   "ElevenLabs", fill=GRAY)
-                    draw.text((104, 95), el_dot[0],    fill=el_dot[1])
-
-                    # ── Internet-status ────────────────────────────────────
-                    draw.text((4, 109),  "Internet",   fill=GRAY)
-                    draw.text((104, 109), net_dot[0],  fill=net_dot[1])
-
-                    # ── Latens ─────────────────────────────────────────────
-                    draw.text((4, 123),  "Latens",     fill=GRAY)
-                    draw.text((88, 123), latency,      fill=WHITE if self.last_latency_ms else GRAY)
+                    draw.line([(0, 37), (127, 37)], fill="white")
+                    draw.text((0, 40),  f"ElevenLabs  {el_dot}", fill="white")
+                    draw.text((0, 50),  f"Internet    {net_dot}", fill="white")
+                    draw.text((80, 50), latency,     fill="white")
 
             except Exception as e:
                 log.debug(f"Ritfel: {e}")
@@ -288,13 +206,10 @@ class TFTDisplay:
             return
         try:
             with canvas(self.device) as draw:
-                draw.rectangle([(0,0),(self.W, self.H)], fill=BGDARK)
-                # Stor rubrik
-                draw.text((14, 40),  "HANSON",       fill=WHITE)
-                draw.text((22, 60),  "v3",           fill=CYAN)
-                draw.rectangle([(0, 78),(self.W, 80)], fill=CYAN)
-                draw.text((8, 86),   "Startar upp…", fill=GRAY)
-            time.sleep(2.0)
+                draw.text((20, 10), "HANSON v3",   fill="white")
+                draw.text((10, 28), "Startar upp...", fill="white")
+                draw.line([(0, 22), (127, 22)],     fill="white")
+            time.sleep(1.5)
         except Exception:
             pass
 
@@ -326,27 +241,26 @@ class TFTDisplay:
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-
-    display = TFTDisplay()
+    display = OLEDDisplay()
 
     if not display.device:
         print("\nIngen display hittades. Kontrollera:")
-        print("  1. SPI aktiverat: sudo raspi-config → Interface Options → SPI")
-        print("  2. Koppling: CS→Pin26(CE1), DC→Pin16, RST→Pin18")
-        print("  3. Bibliotek: pip install luma.lcd pillow --break-system-packages")
+        print("  1. I2C aktiverat: sudo raspi-config → Interface Options → I2C")
+        print("  2. Koppling: VCC→Pin1, GND→Pin6, SCL→Pin5, SDA→Pin3")
+        print("  3. sudo i2cdetect -y 1  (bör visa 3c)")
         exit(1)
 
     print("Display-test. Ctrl+C för att avsluta.\n")
     display.check_connectivity()
 
     test_cases = [
-        (HansonState.IDLE,      "",                    0),
-        (HansonState.MOTION,    "",                    0),
-        (HansonState.LISTENING, "Berätta mer...",      0),
-        (HansonState.THINKING,  "Vad är klockan?",   312),
-        (HansonState.SPEAKING,  "Vad är klockan?",   312),
-        (HansonState.ERROR,     "",                    0),
-        (HansonState.IDLE,      "",                    0),
+        (HansonState.IDLE,      "",                 0),
+        (HansonState.MOTION,    "",                 0),
+        (HansonState.LISTENING, "Berätta mer...",   0),
+        (HansonState.THINKING,  "Vad är klockan?", 312),
+        (HansonState.SPEAKING,  "Vad är klockan?", 312),
+        (HansonState.ERROR,     "",                 0),
+        (HansonState.IDLE,      "",                 0),
     ]
 
     try:
