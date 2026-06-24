@@ -33,10 +33,35 @@ try:
     from luma.core.interface.serial import i2c
     from luma.oled.device import sh1106
     from luma.core.render import canvas
+    from PIL import ImageFont
     DISPLAY_AVAILABLE = True
 except ImportError:
     DISPLAY_AVAILABLE = False
     log.warning("luma.oled saknas – display inaktiverad. Installera: pip install luma.oled pillow")
+
+# ── Font med svenskt teckenstöd (åäö) och enkla statusprickar ──────────────────
+# DejaVu Sans följer med på praktiskt taget alla Debian/Raspberry Pi OS-
+# installationer. Standardfonten i Pillow saknar både åäö och ●/○.
+_FONT_PATHS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+
+def _load_font(size: int):
+    for path in _FONT_PATHS:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    log.warning("DejaVuSans.ttf hittades inte — åäö/●○ kommer inte visas korrekt")
+    return None
+
+if DISPLAY_AVAILABLE:
+    FONT_NORMAL = _load_font(11)
+    FONT_SMALL  = _load_font(9)
+else:
+    FONT_NORMAL = None
+    FONT_SMALL  = None
 
 
 # ── Tillstånd ──────────────────────────────────────────────────────────────────
@@ -181,22 +206,22 @@ class OLEDDisplay:
         with self._lock:
             try:
                 with canvas(self.device) as draw:
-                    draw.text((0, 0),   "HANSON",    fill="white")
-                    draw.text((90, 0),  time_str,    fill="white")
+                    draw.text((0, 0),   "HANSON",    fill="white", font=FONT_NORMAL)
+                    draw.text((90, 0),  time_str,    fill="white", font=FONT_NORMAL)
                     draw.line([(0, 11), (127, 11)], fill="white")
 
-                    draw.text((0, 14),  icon,        fill="white")
-                    draw.text((52, 14), status,      fill="white")
+                    draw.text((0, 14),  icon,        fill="white", font=FONT_NORMAL)
+                    draw.text((52, 14), status,      fill="white", font=FONT_NORMAL)
 
                     if self.last_transcript and self.state in (
                         HansonState.LISTENING, HansonState.THINKING, HansonState.SPEAKING
                     ):
-                        draw.text((0, 26), self.last_transcript, fill="white")
+                        draw.text((0, 26), self.last_transcript, fill="white", font=FONT_NORMAL)
 
                     draw.line([(0, 37), (127, 37)], fill="white")
-                    draw.text((0, 40),  f"ElevenLabs  {el_dot}", fill="white")
-                    draw.text((0, 50),  f"Internet    {net_dot}", fill="white")
-                    draw.text((80, 50), latency,     fill="white")
+                    draw.text((0, 40),  f"ElevenLabs  {el_dot}", fill="white", font=FONT_SMALL)
+                    draw.text((0, 50),  f"Internet    {net_dot}", fill="white", font=FONT_SMALL)
+                    draw.text((80, 50), latency,     fill="white", font=FONT_SMALL)
 
             except Exception as e:
                 log.debug(f"Ritfel: {e}")
@@ -206,8 +231,8 @@ class OLEDDisplay:
             return
         try:
             with canvas(self.device) as draw:
-                draw.text((20, 10), "HANSON v3",   fill="white")
-                draw.text((10, 28), "Startar upp...", fill="white")
+                draw.text((20, 10), "HANSON v3",   fill="white", font=FONT_NORMAL)
+                draw.text((10, 28), "Startar upp...", fill="white", font=FONT_NORMAL)
                 draw.line([(0, 22), (127, 22)],     fill="white")
             time.sleep(1.5)
         except Exception:
