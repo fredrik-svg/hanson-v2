@@ -112,7 +112,8 @@ OUTPUT_DEVICE = 2   # USB PnP Audio Device (Waveshare) — bekräftat på Hanson
 SAMPLE_RATE  = 16000
 CHANNELS_IN  = 6        # ReSpeaker har 6 kanaler, vi använder kanal 0
 CHANNELS_OUT = 1        # Mono ut (Waveshare-kortet, justera till 2 om det kräver stereo)
-BLOCKSIZE    = 1024
+BLOCKSIZE        = 1024   # Input-blockstorlek (64ms vid 16kHz) — mikrofon ska vara responsiv
+OUTPUT_BLOCKSIZE = 2048   # Output-blockstorlek (128ms vid 16kHz) — extra marginal mot pitch-glidning/xruns
 
 PIR_DEBOUNCE_SECONDS     = 0.5     # Ignorera PIR-flanker snabbare än detta (skydd mot darrande sensor)
 MAX_CONVERSATION_SECONDS = 300.0
@@ -195,6 +196,7 @@ class HansonAudioInterface(AudioInterface):
             samplerate=SAMPLE_RATE,
             dtype="int16",
             blocksize=BLOCKSIZE,
+            latency="low",
             callback=_in_callback,
         )
         self.in_stream.start()
@@ -204,9 +206,16 @@ class HansonAudioInterface(AudioInterface):
         # mot ljudkortets klocka för långa svar. Med en callback styr
         # hårdvaran exakt när nästa bit ljud hämtas, vilket är samma mönster
         # ElevenLabs egen DefaultAudioInterface använder via PyAudio.
+        #
+        # latency='high' ger PortAudio en större hårdvarubuffer, vilket
+        # skyddar mot underrun/overrun (hörs som pitch-glidning/"svajigt"
+        # ljud) om vår Python-callback ibland svarar några ms för sent på
+        # grund av GIL-konkurrens med LED-trådar, input-callback, etc.
+        # Kostar lite extra latens (några tiotal ms) men det är ett bra
+        # byte mot stabilt ljud i en entré-miljö.
         def _out_callback(outdata, frames, time_info, status):
             if status:
-                log.debug(f"Output status: {status}")
+                log.warning(f"Output xrun/status: {status}")
             with self._buffer_lock:
                 available = len(self._out_buffer)
                 if available >= frames:
@@ -224,7 +233,8 @@ class HansonAudioInterface(AudioInterface):
             channels=CHANNELS_OUT,
             samplerate=SAMPLE_RATE,
             dtype="int16",
-            blocksize=BLOCKSIZE,
+            blocksize=OUTPUT_BLOCKSIZE,
+            latency="high",
             callback=_out_callback,
         )
         self.out_stream.start()
