@@ -120,7 +120,10 @@ CHANNELS_IN  = 6        # ReSpeaker har 6 kanaler, vi använder kanal 0
 CHANNELS_OUT = 2        # ReSpeakerns utgång är stereo (out:2). Mono-ljud från
                         # ElevenLabs dupliceras till båda kanaler i output().
 BLOCKSIZE        = 1024   # Input-blockstorlek (64ms vid 16kHz) — mikrofon ska vara responsiv
-OUTPUT_BLOCKSIZE = 2048   # Output-blockstorlek (128ms vid 16kHz) — extra marginal mot pitch-glidning/xruns
+OUTPUT_BLOCKSIZE = 1024   # Output-blockstorlek (64ms vid 16kHz). Sänkt från 2048
+                          # efter byte till ReSpeakerns utgång — lägre latens så
+                          # AEC-referens och turn-taking inte släpar. Höj igen om
+                          # ljudet blir svajigt/pitch-glidande på denna utgång.
 
 PIR_DEBOUNCE_SECONDS     = 0.5     # Ignorera PIR-flanker snabbare än detta (skydd mot darrande sensor)
 MAX_CONVERSATION_SECONDS = 300.0
@@ -260,7 +263,7 @@ class HansonAudioInterface(AudioInterface):
             samplerate=SAMPLE_RATE,
             dtype="int16",
             blocksize=OUTPUT_BLOCKSIZE,
-            latency="high",
+            latency="low",
             callback=_out_callback,
         )
         self.out_stream.start()
