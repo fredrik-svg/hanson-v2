@@ -106,12 +106,19 @@ PIR_PIN    = 27
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array (UAC1.0) — bekräftat på Hanson-Pi:n
-OUTPUT_DEVICE = 2   # USB PnP Audio Device (Waveshare) — bekräftat på Hanson-Pi:n
+OUTPUT_DEVICE = 1   # ReSpeaker egen utgång — SAMMA enhet som mikrofonen!
+                    # Detta ger ReSpeakerns hårdvaru-AEC (XVF-3000) den
+                    # referenssignal den behöver: när uppspelning och
+                    # inspelning sker på samma enhet kan AEC-chippet cancla
+                    # ekot internt. Med en separat högtalare (Waveshare =
+                    # device 2) var detta omöjligt eftersom AEC inte hade
+                    # någon aning om vad som spelades på en annan enhet.
 
 # Båda enheterna kör nu samma sample rate — ingen konvertering behövs
 SAMPLE_RATE  = 16000
 CHANNELS_IN  = 6        # ReSpeaker har 6 kanaler, vi använder kanal 0
-CHANNELS_OUT = 1        # Mono ut (Waveshare-kortet, justera till 2 om det kräver stereo)
+CHANNELS_OUT = 2        # ReSpeakerns utgång är stereo (out:2). Mono-ljud från
+                        # ElevenLabs dupliceras till båda kanaler i output().
 BLOCKSIZE        = 1024   # Input-blockstorlek (64ms vid 16kHz) — mikrofon ska vara responsiv
 OUTPUT_BLOCKSIZE = 2048   # Output-blockstorlek (128ms vid 16kHz) — extra marginal mot pitch-glidning/xruns
 
@@ -154,6 +161,11 @@ class HansonAudioInterface(AudioInterface):
     svar där ljud fortfarande ligger kvar i bufferten efter sista STOP.
     """
 
+    # När output går via ReSpeakerns EGEN utgång (samma enhet som mikrofonen)
+    # sköter ReSpeakerns hårdvaru-AEC ekot, och då vill vi INTE ha mjukvaru-
+    # svansskyddet aktivt — det skulle blockera interrupt/barge-in i onödan.
+    # Sätt till True bara om output går via en SEPARAT högtalare utan AEC.
+    TAIL_GUARD_ENABLED        = False
     TAIL_GUARD_MARGIN_SECONDS = 0.3   # Extra marginal utöver beräknad speltid
 
     def __init__(self):
@@ -165,14 +177,22 @@ class HansonAudioInterface(AudioInterface):
 
     def mute_mic_tail(self):
         """
-        Anropas vid varje STOP-event. Räknar ut hur lång tid det faktiskt
-        är kvar tills allt köat ljud spelats ut, och sätter mute-fönstret
-        till minst den tiden. Om ett tidigare (längre) fönster redan löper
-        förkortas det ALDRIG av detta anrop — bara förlängs vid behov.
+        Anropas vid varje STOP-event. Om svansskyddet är aktiverat: räknar
+        ut hur lång tid det faktiskt är kvar tills allt köat ljud spelats ut
+        och förlänger mute-fönstret. Om avstängt (TAIL_GUARD_ENABLED=False,
+        för när hårdvaru-AEC sköter ekot): gör ingenting.
         """
+        if not self.TAIL_GUARD_ENABLED:
+            return
         remaining = self.seconds_remaining()
         new_until = time.time() + remaining + self.TAIL_GUARD_MARGIN_SECONDS
+        old_until = self._mic_muted_until
         self._mic_muted_until = max(self._mic_muted_until, new_until)
+        log.info(
+            f"Svansskydd: queued={remaining:.2f}s, mute-fönster förlängt "
+            f"{max(0, self._mic_muted_until - time.time()):.2f}s framåt "
+            f"(var {max(0, old_until - time.time()):.2f}s)"
+        )
 
     def seconds_remaining(self) -> float:
         """Exakt återstående speltid: kö-buffer i sekunder + hårdvarulatens."""
@@ -182,11 +202,17 @@ class HansonAudioInterface(AudioInterface):
         return queued_seconds + hw_latency
 
     def start(self, input_callback):
+        unmute_logged = [True]   # Lista för mutable closure-state
+
         def _in_callback(indata, frames, time_info, status):
             if status:
                 log.debug(f"Input status: {status}")
             if time.time() < self._mic_muted_until:
+                unmute_logged[0] = False
                 return   # Inom svansskydds-fönstret — skicka inget till ElevenLabs
+            if not unmute_logged[0]:
+                log.info("Svansskydd: mute-fönster slut, mikrofon öppen igen")
+                unmute_logged[0] = True
             mono = indata[:, 0].copy()   # Kanal 0 från ReSpeaker
             input_callback(mono.tobytes())
 
