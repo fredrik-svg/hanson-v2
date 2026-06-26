@@ -140,16 +140,20 @@ class HansonAudioInterface(AudioInterface):
 
     AEC hanterar eko mot ReSpeakerns EGEN utgång, men inte mot Waveshare-
     USB-högtalaren (separat enhet utan referenssignal till AEC-chippet).
-    Därför finns ett minimalt "svansskydd": ett kort tidsfönster efter att
-    agenten slutat prata där mikrofondata inte skickas vidare, för att
-    undvika att de sista millisekunderna av agentens egen röst (efterklang
-    i rummet, eller restljud i Waveshare-kortets buffer) misstolkas som en
-    ny fråga. Detta är medvetet enkelt — en fast 400ms tystnad, inte ett
-    dynamiskt väntesystem — eftersom ElevenLabs' egen "disable interruption"
-    -inställning redan hanterar huvuddelen av eko-problemet på serversidan.
+    Därför finns ett svansskydd: ett tidsfönster efter att agenten slutat
+    prata där mikrofondata inte skickas vidare, för att undvika att svansen
+    av agentens egen röst misstolkas som en ny fråga.
+
+    Fönstret är DYNAMISKT, inte en fast tid: vid varje STOP-event räknas
+    faktisk återstående speltid ut (vad som ligger okört i vår buffer plus
+    PortAudios rapporterade hårdvarulatens) och mute-fönstret sätts till
+    EXAKT den tiden plus en liten säkerhetsmarginal. Detta är nödvändigt
+    eftersom långa svar levereras i flera START/STOP-chunks — en fast
+    tid räcker för korta repliker men missar konsekvent svansen på långa
+    svar där ljud fortfarande ligger kvar i bufferten efter sista STOP.
     """
 
-    TAIL_GUARD_SECONDS = 1.0
+    TAIL_GUARD_MARGIN_SECONDS = 0.3   # Extra marginal utöver beräknad speltid
 
     def __init__(self):
         self.in_stream     = None
@@ -159,8 +163,22 @@ class HansonAudioInterface(AudioInterface):
         self._mic_muted_until = 0.0   # Unix-tid; mikrofondata kastas innan denna tid
 
     def mute_mic_tail(self):
-        """Anropas vid STOP-eventet: tysta mikrofonen TAIL_GUARD_SECONDS framåt."""
-        self._mic_muted_until = time.time() + self.TAIL_GUARD_SECONDS
+        """
+        Anropas vid varje STOP-event. Räknar ut hur lång tid det faktiskt
+        är kvar tills allt köat ljud spelats ut, och sätter mute-fönstret
+        till minst den tiden. Om ett tidigare (längre) fönster redan löper
+        förkortas det ALDRIG av detta anrop — bara förlängs vid behov.
+        """
+        remaining = self.seconds_remaining()
+        new_until = time.time() + remaining + self.TAIL_GUARD_MARGIN_SECONDS
+        self._mic_muted_until = max(self._mic_muted_until, new_until)
+
+    def seconds_remaining(self) -> float:
+        """Exakt återstående speltid: kö-buffer i sekunder + hårdvarulatens."""
+        with self._buffer_lock:
+            queued_seconds = len(self._out_buffer) / SAMPLE_RATE
+        hw_latency = self.out_stream.latency if self.out_stream else 0.0
+        return queued_seconds + hw_latency
 
     def start(self, input_callback):
         def _in_callback(indata, frames, time_info, status):
@@ -249,11 +267,6 @@ class HansonAudioInterface(AudioInterface):
         """Töm output-bufferten omedelbart (t.ex. om agenten avbryts)."""
         with self._buffer_lock:
             self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
-
-    def output_buffer_seconds(self) -> float:
-        """Hjälpmetod för diagnostik: hur många sekunder ljud ligger köat."""
-        with self._buffer_lock:
-            return len(self._out_buffer) / SAMPLE_RATE
 
     def cleanup(self):
         self.stop()
