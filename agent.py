@@ -23,9 +23,12 @@ SESSIONSMODELL (viktigt):
   Detta eliminerar tidigare race conditions kring PIR-triggade starter
   mitt i en aktiv konversation.
 
-VIKTIGT — fyll i dessa innan körning:
-  INPUT_DEVICE  = device-index för ReSpeaker (kör list_audio_devices() för att se)
-  OUTPUT_DEVICE = device-index för Waveshare USB-ljudkort
+INPUT_DEVICE / OUTPUT_DEVICE är redan ifyllda nedan baserat på den bekräftade
+hårdvarukonfigurationen (ReSpeaker=device 1, Waveshare USB-ljudkort=device 2).
+Om du byter USB-port, lägger till fler USB-enheter, eller kör om operativ-
+systemet, kan ordningen ändras — kör list_audio_devices() för att verifiera
+och uppdatera siffrorna nedan om enheterna inte hittas (loggas som varning
+vid uppstart i så fall).
 
 Eftersom ReSpeakerns AEC nu tar bort eko i hårdvaran, och Waveshare-kortet
 kör samma 16kHz som ElevenLabs native, har vi kunnat ta bort:
@@ -102,8 +105,8 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = 1   # ← ReSpeaker 4 Mic Array device-index
-OUTPUT_DEVICE = 2   # ← Waveshare USB-ljudkort device-index
+INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array (UAC1.0) — bekräftat på Hanson-Pi:n
+OUTPUT_DEVICE = 2   # USB PnP Audio Device (Waveshare) — bekräftat på Hanson-Pi:n
 
 # Båda enheterna kör nu samma sample rate — ingen konvertering behövs
 SAMPLE_RATE  = 16000
@@ -146,7 +149,7 @@ class HansonAudioInterface(AudioInterface):
     -inställning redan hanterar huvuddelen av eko-problemet på serversidan.
     """
 
-    TAIL_GUARD_SECONDS = 0.4
+    TAIL_GUARD_SECONDS = 1.0
 
     def __init__(self):
         self.in_stream     = None
