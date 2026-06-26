@@ -102,8 +102,8 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = 1   # ← ReSpeaker 4 Mic Array device-index
-OUTPUT_DEVICE = 2   # ← Waveshare USB-ljudkort device-index
+INPUT_DEVICE  = None   # ← ReSpeaker 4 Mic Array device-index
+OUTPUT_DEVICE = None   # ← Waveshare USB-ljudkort device-index
 
 # Båda enheterna kör nu samma sample rate — ingen konvertering behövs
 SAMPLE_RATE  = 16000
@@ -133,21 +133,38 @@ def list_audio_devices():
 # ══════════════════════════════════════════════════════════════════════════════
 class HansonAudioInterface(AudioInterface):
     """
-    Förenklad AudioInterface — ingen resampling, ingen mute-logik.
-    ReSpeakerns hårdvaru-AEC hanterar eko, matchande 16kHz sample rate
-    eliminerar behovet av konvertering.
+    Förenklad AudioInterface med ReSpeakerns hårdvaru-AEC.
+
+    AEC hanterar eko mot ReSpeakerns EGEN utgång, men inte mot Waveshare-
+    USB-högtalaren (separat enhet utan referenssignal till AEC-chippet).
+    Därför finns ett minimalt "svansskydd": ett kort tidsfönster efter att
+    agenten slutat prata där mikrofondata inte skickas vidare, för att
+    undvika att de sista millisekunderna av agentens egen röst (efterklang
+    i rummet, eller restljud i Waveshare-kortets buffer) misstolkas som en
+    ny fråga. Detta är medvetet enkelt — en fast 400ms tystnad, inte ett
+    dynamiskt väntesystem — eftersom ElevenLabs' egen "disable interruption"
+    -inställning redan hanterar huvuddelen av eko-problemet på serversidan.
     """
+
+    TAIL_GUARD_SECONDS = 0.4
 
     def __init__(self):
         self.in_stream     = None
         self.out_stream    = None
         self._out_buffer   = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
         self._buffer_lock  = threading.Lock()
+        self._mic_muted_until = 0.0   # Unix-tid; mikrofondata kastas innan denna tid
+
+    def mute_mic_tail(self):
+        """Anropas vid STOP-eventet: tysta mikrofonen TAIL_GUARD_SECONDS framåt."""
+        self._mic_muted_until = time.time() + self.TAIL_GUARD_SECONDS
 
     def start(self, input_callback):
         def _in_callback(indata, frames, time_info, status):
             if status:
                 log.debug(f"Input status: {status}")
+            if time.time() < self._mic_muted_until:
+                return   # Inom svansskydds-fönstret — skicka inget till ElevenLabs
             mono = indata[:, 0].copy()   # Kanal 0 från ReSpeaker
             input_callback(mono.tobytes())
 
@@ -481,6 +498,8 @@ class RaspberryPiAgent:
                 self.led.start_agent_speaking()
                 self._set_display_state(HansonState.SPEAKING if DISPLAY_AVAILABLE else None)
             elif part_type == AgentChatResponsePartType.STOP:
+                if self._current_audio:
+                    self._current_audio.mute_mic_tail()
                 if self.conversation_active:
                     self.led.start_listening()
                     self._set_display_state(HansonState.LISTENING if DISPLAY_AVAILABLE else None)
