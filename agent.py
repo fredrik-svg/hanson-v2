@@ -272,20 +272,21 @@ class HansonAudioInterface(AudioInterface):
                  f"(matchande {SAMPLE_RATE}Hz, ingen resampling)")
 
     def stop(self):
-        if self.in_stream:
-            try:
-                self.in_stream.stop()
-                self.in_stream.close()
-            except Exception:
-                pass
-            self.in_stream = None
-        if self.out_stream:
-            try:
-                self.out_stream.stop()
-                self.out_stream.close()
-            except Exception:
-                pass
-            self.out_stream = None
+        # abort() istället för stop(): stop() väntar på att buffrat ljud
+        # spelas klart och kan kasta pthread_join-fel om callbacken är mitt
+        # i ett anrop vid stängning. abort() stoppar omedelbart och rent,
+        # vilket är vad vi vill vid sessionsavslut (inget halvspelat svar
+        # behöver spelas färdigt när användaren/agenten avslutat).
+        for stream_attr in ("in_stream", "out_stream"):
+            stream = getattr(self, stream_attr, None)
+            if stream is not None:
+                try:
+                    if not stream.closed:
+                        stream.abort(ignore_errors=True)
+                        stream.close(ignore_errors=True)
+                except Exception as e:
+                    log.debug(f"Stream-stängning ({stream_attr}) varning: {e}")
+                setattr(self, stream_attr, None)
         with self._buffer_lock:
             self._out_buffer = np.zeros((0, CHANNELS_OUT), dtype=np.int16)
 
@@ -571,7 +572,6 @@ class RaspberryPiAgent:
 
     def _on_end_session(self):
         try:
-            log.info("Session avslutad (av ElevenLabs eller lokalt)")
             self._cleanup_after_session()
         except Exception as e:
             log.error(f"Fel i _on_end_session: {e}", exc_info=True)
@@ -581,13 +581,13 @@ class RaspberryPiAgent:
     def _cleanup_after_session(self):
         with self._session_lock:
             if not self.conversation_active:
-                return
+                return   # Redan rensat av en annan tråd — logga/pulsa inte igen
             self.conversation_active = False
             self._last_session_end   = time.time()
+        log.info("Session avslutad — redo för nästa konversation")
         self.led.stop_effect()
         self.led.pulse_once(LEDController.ENDING)
         self._set_display_state(HansonState.IDLE if DISPLAY_AVAILABLE else None)
-        log.info("Redo för nästa konversation")
 
     def _rate_limit_ok(self) -> bool:
         """
