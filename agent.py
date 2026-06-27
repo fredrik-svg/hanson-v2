@@ -114,8 +114,12 @@ OUTPUT_DEVICE = 1   # ReSpeaker egen utgång — SAMMA enhet som mikrofonen!
                     # device 2) var detta omöjligt eftersom AEC inte hade
                     # någon aning om vad som spelades på en annan enhet.
 
-# Båda enheterna kör nu samma sample rate — ingen konvertering behövs
-SAMPLE_RATE  = 16000
+# Sample rates: mikrofonen kör 16kHz (ReSpeaker native + ElevenLabs ASR),
+# men UPPSPELNING körs i 24kHz för fylligare ljud (mindre burkigt).
+# OBS: Sätt agentens TTS output format till pcm_24000 i ElevenLabs Dashboard
+# för att detta ska stämma — annars spelas 16kHz-ljud i fel hastighet.
+SAMPLE_RATE_IN   = 16000   # Mikrofon → ElevenLabs ASR (ReSpeaker native)
+SAMPLE_RATE_OUT  = 24000   # ElevenLabs TTS → högtalare (pcm_24000 i Dashboard!)
 CHANNELS_IN  = 6        # ReSpeaker har 6 kanaler, vi använder kanal 0
 CHANNELS_OUT = 2        # ReSpeakerns utgång är stereo (out:2). Mono-ljud från
                         # ElevenLabs dupliceras till båda kanaler i output().
@@ -200,7 +204,7 @@ class HansonAudioInterface(AudioInterface):
     def seconds_remaining(self) -> float:
         """Exakt återstående speltid: kö-buffer i sekunder + hårdvarulatens."""
         with self._buffer_lock:
-            queued_seconds = len(self._out_buffer) / SAMPLE_RATE
+            queued_seconds = len(self._out_buffer) / SAMPLE_RATE_OUT
         hw_latency = self.out_stream.latency if self.out_stream else 0.0
         return queued_seconds + hw_latency
 
@@ -222,7 +226,7 @@ class HansonAudioInterface(AudioInterface):
         self.in_stream = sd.InputStream(
             device=INPUT_DEVICE,
             channels=CHANNELS_IN,
-            samplerate=SAMPLE_RATE,
+            samplerate=SAMPLE_RATE_IN,
             dtype="int16",
             blocksize=BLOCKSIZE,
             latency="low",
@@ -260,7 +264,7 @@ class HansonAudioInterface(AudioInterface):
         self.out_stream = sd.OutputStream(
             device=OUTPUT_DEVICE,
             channels=CHANNELS_OUT,
-            samplerate=SAMPLE_RATE,
+            samplerate=SAMPLE_RATE_OUT,
             dtype="int16",
             blocksize=OUTPUT_BLOCKSIZE,
             latency="low",
@@ -268,8 +272,8 @@ class HansonAudioInterface(AudioInterface):
         )
         self.out_stream.start()
 
-        log.info(f"Audio: input=device{INPUT_DEVICE} output=device{OUTPUT_DEVICE} "
-                 f"(matchande {SAMPLE_RATE}Hz, ingen resampling)")
+        log.info(f"Audio: input=device{INPUT_DEVICE} ({SAMPLE_RATE_IN}Hz) "
+                 f"output=device{OUTPUT_DEVICE} ({SAMPLE_RATE_OUT}Hz)")
 
     def stop(self):
         # abort() istället för stop(): stop() väntar på att buffrat ljud
@@ -788,8 +792,8 @@ class RaspberryPiAgent:
         print("=" * 52)
         print("  Hanson v3 – Förenklad (AEC + matchande sample rate)")
         print("=" * 52)
-        print(f"  Input  : device {INPUT_DEVICE} ({SAMPLE_RATE}Hz {CHANNELS_IN}ch)")
-        print(f"  Output : device {OUTPUT_DEVICE} ({SAMPLE_RATE}Hz {CHANNELS_OUT}ch)")
+        print(f"  Input  : device {INPUT_DEVICE} ({SAMPLE_RATE_IN}Hz {CHANNELS_IN}ch)")
+        print(f"  Output : device {OUTPUT_DEVICE} ({SAMPLE_RATE_OUT}Hz {CHANNELS_OUT}ch)")
         print(f"  Knapp  : GPIO {BUTTON_PIN}  (start/avslut av session)")
         print(f"  PIR    : GPIO {PIR_PIN}    (endast kosmetisk väckning, ingen sessionspåverkan)")
         print(f"  Skärm  : {'Aktiverad' if DISPLAY_AVAILABLE else 'Ej ansluten/installerad'}")
