@@ -1,0 +1,28 @@
+[Unit]
+Description=Hanson v3 ElevenLabs Conversational AI Agent
+# Vänta tills ljudsystemet (PipeWire) i användarsessionen är igång
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/home/genio/hanson-v2
+ExecStart=/home/genio/hanson-v2/venv/bin/python3 /home/genio/hanson-v2/agent.py
+
+# Omstart vid krasch, med crash-loop-skydd via StartLimit ovan
+Restart=always
+RestartSec=5
+
+# Ren nedstängning: SIGINT triggar KeyboardInterrupt → städar LED/skärm/GPIO
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+# Loggar till journalen — kom åt med: journalctl --user -u hanson -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hanson
+
+[Install]
+WantedBy=default.target
