@@ -105,12 +105,14 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = 3   # "pipewire" — routas via PipeWire echo-cancel till
-                    # hanson_echo_cancelled_mic (default source). Ger eko-rensad
-                    # mikrofonsignal: ReSpeaker MINUS Waveshare-högtalarens ljud.
-OUTPUT_DEVICE = 3   # "pipewire" — routas via echo-cancel till
-                    # hanson_echo_cancelled_speaker (default sink) → Waveshare.
-                    # PipeWire skickar samma ljud som AEC-referenssignal.
+# Enhetsval: vi slår upp "pipewire"-enheten BY NAME vid uppstart istället för
+# att hårdkoda ett index. Indexen flyttar sig mellan omstarter (pipewire kan
+# vara device 3, 5, ...) beroende på vilka ALSA-enheter som dyker upp, så ett
+# fast nummer är opålitligt. Namnet "pipewire" är däremot stabilt.
+# Sätts av _resolve_audio_devices() i __init__.
+INPUT_DEVICE  = None   # Slås upp by name → "pipewire"
+OUTPUT_DEVICE = None   # Slås upp by name → "pipewire"
+PIPEWIRE_DEVICE_NAME = "pipewire"
 
 # Sample rates. ReSpeaker 4 Mic Array är en talspecifik enhet låst till
 # 16kHz på BÅDE in- och utgång — den klarar inte högre frekvenser. Eftersom
@@ -469,13 +471,9 @@ class RaspberryPiAgent:
         if not AGENT_ID:
             log.error("ELEVENLABS_AGENT_ID saknas i .env")
             sys.exit(1)
-        if INPUT_DEVICE is None or OUTPUT_DEVICE is None:
-            log.error(
-                "INPUT_DEVICE/OUTPUT_DEVICE är inte ifyllda i agent.py! "
-                "Kör list_audio_devices() för att hitta rätt index, "
-                "fyll i värdena överst i filen, och försök igen."
-            )
-            sys.exit(1)
+
+        # Slå upp "pipewire"-enheten by name (index varierar mellan omstarter)
+        self._resolve_audio_devices()
 
         self.client              = ElevenLabs(api_key=ELEVENLABS_API_KEY)
         self.led                 = LEDController()
@@ -499,6 +497,37 @@ class RaspberryPiAgent:
 
         self._setup_gpio()
         self._verify_audio()
+
+    def _resolve_audio_devices(self):
+        """
+        Hittar 'pipewire'-enheten by name och sätter INPUT_DEVICE/OUTPUT_DEVICE
+        globalt. Indexen är instabila mellan omstarter (pipewire kan vara
+        device 3, 5, ...) men namnet 'pipewire' är stabilt. PipeWire routar
+        sedan vidare till hanson_echo_cancelled_mic/speaker (default-enheter).
+        """
+        global INPUT_DEVICE, OUTPUT_DEVICE
+        pw_in = pw_out = None
+        try:
+            for i, d in enumerate(sd.query_devices()):
+                if d["name"] == PIPEWIRE_DEVICE_NAME:
+                    if d["max_input_channels"] > 0 and pw_in is None:
+                        pw_in = i
+                    if d["max_output_channels"] > 0 and pw_out is None:
+                        pw_out = i
+        except Exception as e:
+            log.error(f"Kunde inte lista ljudenheter: {e}")
+
+        if pw_in is None or pw_out is None:
+            log.error(
+                f"Hittade inte '{PIPEWIRE_DEVICE_NAME}'-enheten! Är PipeWire igång? "
+                f"Kontrollera 'pactl info' och att echo-cancel-modulen laddats."
+            )
+            sys.exit(1)
+
+        INPUT_DEVICE  = pw_in
+        OUTPUT_DEVICE = pw_out
+        log.info(f"Ljudenheter upplösta: '{PIPEWIRE_DEVICE_NAME}' "
+                 f"input=index{INPUT_DEVICE} output=index{OUTPUT_DEVICE}")
 
     def _setup_gpio(self):
         if not GPIO_AVAILABLE:
