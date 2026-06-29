@@ -9,7 +9,7 @@ StartLimitBurst=10
 [Service]
 Type=simple
 WorkingDirectory=/home/genio/hanson-v2
-ExecStart=/home/genio/hanson-v2/venv/bin/python3 /home/genio/hanson-v2/agent.py
+ExecStart=/home/genio/hanson-v2/start-hanson.sh
 
 # Omstart vid krasch, med crash-loop-skydd via StartLimit ovan
 Restart=always
