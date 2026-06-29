@@ -105,23 +105,28 @@ PIR_PIN    = 27
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  FYLL I DESSA EFTER ATT DU KÖRT list_audio_devices() PÅ PI:N             ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
-INPUT_DEVICE  = 1   # ReSpeaker 4 Mic Array (UAC1.0) — bekräftat på Hanson-Pi:n
-OUTPUT_DEVICE = 1   # ReSpeaker egen utgång — SAMMA enhet som mikrofonen!
-                    # Detta ger ReSpeakerns hårdvaru-AEC (XVF-3000) den
-                    # referenssignal den behöver: när uppspelning och
-                    # inspelning sker på samma enhet kan AEC-chippet cancla
-                    # ekot internt. Med en separat högtalare (Waveshare =
-                    # device 2) var detta omöjligt eftersom AEC inte hade
-                    # någon aning om vad som spelades på en annan enhet.
+INPUT_DEVICE  = 3   # "pipewire" — routas via PipeWire echo-cancel till
+                    # hanson_echo_cancelled_mic (default source). Ger eko-rensad
+                    # mikrofonsignal: ReSpeaker MINUS Waveshare-högtalarens ljud.
+OUTPUT_DEVICE = 3   # "pipewire" — routas via echo-cancel till
+                    # hanson_echo_cancelled_speaker (default sink) → Waveshare.
+                    # PipeWire skickar samma ljud som AEC-referenssignal.
 
-# Sample rates: mikrofonen kör 16kHz (ReSpeaker native + ElevenLabs ASR),
-# men UPPSPELNING körs i 24kHz för fylligare ljud (mindre burkigt).
-# OBS: Sätt agentens TTS output format till pcm_24000 i ElevenLabs Dashboard
-# för att detta ska stämma — annars spelas 16kHz-ljud i fel hastighet.
-SAMPLE_RATE_IN   = 16000   # Mikrofon → ElevenLabs ASR (ReSpeaker native)
-SAMPLE_RATE_OUT  = 24000   # ElevenLabs TTS → högtalare (pcm_24000 i Dashboard!)
-CHANNELS_IN  = 6        # ReSpeaker har 6 kanaler, vi använder kanal 0
-CHANNELS_OUT = 2        # ReSpeakerns utgång är stereo (out:2). Mono-ljud från
+# Sample rates. ReSpeaker 4 Mic Array är en talspecifik enhet låst till
+# 16kHz på BÅDE in- och utgång — den klarar inte högre frekvenser. Eftersom
+# vi kör output via ReSpeakern (för dess hårdvaru-AEC mot eko) är vi därför
+# låsta till 16kHz även på uppspelning. Vill man ha fylligare 24kHz-ljud
+# krävs en separat högtalarenhet (t.ex. Waveshare-kortet) PLUS PipeWire
+# echo-cancel för att lösa ekot mellan de två separata enheterna.
+# Sample rates: vi öppnar pipewire-enheten direkt i ElevenLabs egna
+# frekvenser (16kHz in för ASR, 24kHz ut för TTS). PipeWire resamplar
+# automatiskt mot hårdvarans native-frekvenser — ingen Python-resampling
+# behövs. Sätt agentens TTS output till pcm_24000 i ElevenLabs Dashboard.
+SAMPLE_RATE_IN   = 16000   # ElevenLabs ASR-format (PipeWire resamplar mot HW)
+SAMPLE_RATE_OUT  = 24000   # ElevenLabs TTS pcm_24000 (PipeWire resamplar mot HW)
+CHANNELS_IN  = 1        # Mono in till ElevenLabs
+CHANNELS_OUT = 1        # ElevenLabs skickar mono; PipeWire-sink är stereo men
+                        # accepterar mono och duplicerar internt
                         # ElevenLabs dupliceras till båda kanaler i output().
 BLOCKSIZE        = 1024   # Input-blockstorlek (64ms vid 16kHz) — mikrofon ska vara responsiv
 OUTPUT_BLOCKSIZE = 1024   # Output-blockstorlek (64ms vid 16kHz). Sänkt från 2048
@@ -220,7 +225,7 @@ class HansonAudioInterface(AudioInterface):
             if not unmute_logged[0]:
                 log.info("Svansskydd: mute-fönster slut, mikrofon öppen igen")
                 unmute_logged[0] = True
-            mono = indata[:, 0].copy()   # Kanal 0 från ReSpeaker
+            mono = indata[:, 0].copy()   # Mono från PipeWire echo-cancel-mic
             input_callback(mono.tobytes())
 
         self.in_stream = sd.InputStream(
