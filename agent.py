@@ -135,6 +135,7 @@ OUTPUT_BLOCKSIZE = 1024   # Output-blockstorlek (64ms vid 16kHz). Sänkt från 2
                           # ljudet blir svajigt/pitch-glidande på denna utgång.
 
 PIR_DEBOUNCE_SECONDS     = 0.5     # Ignorera PIR-flanker snabbare än detta (skydd mot darrande sensor)
+BUTTON_DEBOUNCE_SECONDS  = 1.5     # Ignorera knapptryck snabbare än detta (studs + dubbeltryck-skydd)
 MAX_CONVERSATION_SECONDS = 300.0
 MAX_CONVERSATIONS_PER_HOUR = 60    # Skydd mot skenande API-kostnad vid skadegörelse/fel
 
@@ -292,6 +293,7 @@ class HansonAudioInterface(AudioInterface):
                 try:
                     if not stream.closed:
                         stream.abort(ignore_errors=True)
+                        time.sleep(0.05)   # Låt PortAudio-tråden avsluta innan close
                         stream.close(ignore_errors=True)
                 except Exception as e:
                     log.debug(f"Stream-stängning ({stream_attr}) varning: {e}")
@@ -492,6 +494,7 @@ class RaspberryPiAgent:
         self._last_session_end   = 0.0
         self._session_lock       = threading.Lock()
         self._last_pir_edge      = 0.0
+        self._last_button_press  = 0.0
         self._conversation_start_times = []   # För MAX_CONVERSATIONS_PER_HOUR
 
         self._setup_gpio()
@@ -825,12 +828,19 @@ class RaspberryPiAgent:
                 # ── KNAPP: enda sessionsstartaren och -avslutaren ──────────
                 btn = self._read_button()
                 if btn and not last_btn:
-                    if not self.conversation_active:
-                        log.info("Knapp: startar ny konversation")
-                        self.start_conversation(trigger="knapp")
+                    now_btn = time.time()
+                    if (now_btn - self._last_button_press) < BUTTON_DEBOUNCE_SECONDS:
+                        # För snabbt efter förra trycket — studs eller
+                        # oavsiktligt dubbeltryck. Ignorera helt.
+                        log.debug("Knapptryck ignorerat (debounce)")
                     else:
-                        log.info("Knapp: avslutar aktiv konversation")
-                        self.end_conversation()
+                        self._last_button_press = now_btn
+                        if not self.conversation_active:
+                            log.info("Knapp: startar ny konversation")
+                            self.start_conversation(trigger="knapp")
+                        else:
+                            log.info("Knapp: avslutar aktiv konversation")
+                            self.end_conversation()
                 last_btn = btn
 
                 # ── PIR: ENDAST kosmetisk väckning, ALDRIG sessionspåverkan ──
