@@ -31,7 +31,7 @@ else
 fi
 
 # Säkerställ också att Waveshare-hårdvaran har vettig volym
-pactl set-sink-volume alsa_output.usb-Solid_State_System_Co._Ltd._USB_PnP_Audio_Device_000000000000-00.analog-stereo 100% 2>/dev/null || true
+pactl set-sink-volume alsa_output.usb-Jieli_Technology_UACDemoV1.0_4150344535343812-00.analog-stereo 100% 2>/dev/null || true
 
 echo "PipeWire-routing klar. Startar Hanson..."
 
