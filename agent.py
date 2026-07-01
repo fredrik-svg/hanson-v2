@@ -69,6 +69,36 @@ logging.basicConfig(
 )
 log = logging.getLogger("hanson")
 
+# ── Separat konversationslogg ──────────────────────────────────────────────────
+# Skriver varje samtalstur (användare/agent) till en dedikerad fil, skild från
+# den tekniska loggen. Format: en rad per yttrande med tidsstämpel, roll och
+# konversations-ID, så dialogkvaliteten kan granskas i efterhand.
+#
+# Roterar automatiskt: när conversations.log når 5 MB byter den namn till
+# conversations.log.1 (osv upp till .5) och en ny tom fil börjar. Håller
+# diskanvändningen begränsad (max ~30 MB totalt) för obevakad långtidsdrift
+# i en entré, utan att gammal historik försvinner direkt.
+CONVERSATION_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "conversations.log"
+)
+conv_log = logging.getLogger("hanson.conversation")
+conv_log.setLevel(logging.INFO)
+conv_log.propagate = False   # Ska INTE dyka upp i den tekniska loggen/journalen
+try:
+    from logging.handlers import RotatingFileHandler
+    _conv_handler = RotatingFileHandler(
+        CONVERSATION_LOG_PATH,
+        maxBytes=5 * 1024 * 1024,   # 5 MB per fil
+        backupCount=5,               # Behåll 5 gamla filer (.1–.5)
+        encoding="utf-8",
+    )
+    _conv_handler.setFormatter(logging.Formatter(
+        "%(asctime)s\t%(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    conv_log.addHandler(_conv_handler)
+except Exception as _e:
+    log.warning(f"Kunde inte öppna konversationslogg ({CONVERSATION_LOG_PATH}): {_e}")
+
 # ── GPIO ───────────────────────────────────────────────────────────────────────
 try:
     import lgpio as GPIO
@@ -494,6 +524,8 @@ class RaspberryPiAgent:
         self._last_pir_edge      = 0.0
         self._last_button_press  = 0.0
         self._conversation_start_times = []   # För MAX_CONVERSATIONS_PER_HOUR
+        self._current_conversation_id  = "pending"   # Sätts när ID:t kommer
+        self._turn_counter             = 0           # Räknar turer i aktuellt samtal
 
         self._setup_gpio()
         self._verify_audio()
@@ -570,6 +602,7 @@ class RaspberryPiAgent:
     def _on_user_transcript(self, transcript: str):
         try:
             log.info(f"Användare: {transcript}")
+            conv_log.info(f"[{self._current_conversation_id}]\tUSER\t{transcript}")
             self.led.start_thinking()
             if self.display:
                 self.display.set_transcript(transcript)
@@ -580,6 +613,7 @@ class RaspberryPiAgent:
     def _on_agent_response(self, response: str):
         try:
             log.info(f"Agent: {response}")
+            conv_log.info(f"[{self._current_conversation_id}]\tAGENT\t{response}")
         except Exception as e:
             log.error(f"Fel i _on_agent_response: {e}", exc_info=True)
 
@@ -685,6 +719,9 @@ class RaspberryPiAgent:
 
             self.conversation.start_session()
             self._session_started_at = time.time()
+            self._turn_counter = 0
+            self._current_conversation_id = "pending"
+            conv_log.info("═══════════ NYTT SAMTAL ═══════════")
 
             time.sleep(0.3)
             try:
@@ -764,7 +801,9 @@ class RaspberryPiAgent:
                 if wait_thread.is_alive():
                     log.warning("wait_for_session_end() svarade inte inom 5s — fortsätter ändå")
                 elif "id" in result_holder and result_holder["id"]:
+                    self._current_conversation_id = result_holder["id"]
                     log.info(f"Conversation ID: {result_holder['id']}")
+                    conv_log.info(f"═══ SAMTAL SLUT (id={result_holder['id']}) ═══\n")
         except Exception as e:
             log.warning(f"Avslutsvarning: {e}")
         finally:
