@@ -562,6 +562,17 @@ class RaspberryPiAgent:
                     self.display = None
             self._remote_input = None
 
+        # DEBUG-genväg: om varken lokal GPIO eller fjärrbrygga finns
+        # tillgänglig (t.ex. VC60 utan peripheral_bridge kopplad än), lyssna
+        # på Enter i terminalen som tillfällig ersättning för knappen. Gör
+        # det möjligt att testköra agenten fristående innan bryggan finns
+        # på plats. Ofarligt no-op på Hanson-Pi:n där GPIO redan fungerar.
+        self._debug_key_flag = threading.Event()
+        if not GPIO_AVAILABLE and not REMOTE_PERIPHERALS:
+            log.info("Ingen GPIO/brygga tillgänglig — tryck ENTER i terminalen "
+                      "för att starta/avsluta en konversation (debug-läge)")
+            threading.Thread(target=self._debug_key_listener, daemon=True).start()
+
         self.gpio_chip           = None
         self.conversation        = None
         self.conversation_active = False
@@ -927,9 +938,23 @@ class RaspberryPiAgent:
 
         threading.Thread(target=_wake_animation, daemon=True).start()
 
+    def _debug_key_listener(self):
+        """Bakgrundstråd: väntar på Enter i terminalen, sätter en flagga som
+        _read_button() konsumerar en gång. Endast aktiv i debug-läge (se
+        __init__) — ersätter aldrig en riktig knapp/brygga när sådan finns."""
+        while True:
+            try:
+                input()
+                self._debug_key_flag.set()
+            except Exception:
+                time.sleep(1.0)
+
     def _read_button(self) -> bool:
         if REMOTE_PERIPHERALS:
             return self._remote_input.poll_button() if self._remote_input else False
+        if self._debug_key_flag.is_set():
+            self._debug_key_flag.clear()
+            return True
         if not self.gpio_chip:
             return False
         try:
