@@ -99,31 +99,67 @@ try:
 except Exception as _e:
     log.warning(f"Kunde inte öppna konversationslogg ({CONVERSATION_LOG_PATH}): {_e}")
 
+# ── Perifer-läge: lokal GPIO (Pi) vs fjärrbrygga (VC60 m.fl. utan GPIO) ─────────
+# Sätt PERIPHERAL_BRIDGE_HOST i .env för att köra agenten på en maskin UTAN
+# egen GPIO (t.ex. VC60). Då pratar LED/OLED/knapp/PIR med peripheral_bridge.py
+# som körs på Hanson-Pi 5:n istället för lokal hårdvara. Lämna ofylld/tom för
+# att köra som tidigare med lokal GPIO (normalt läge på Hanson-Pi:n själv).
+PERIPHERAL_BRIDGE_HOST = os.getenv("PERIPHERAL_BRIDGE_HOST", "").strip()
+REMOTE_PERIPHERALS = bool(PERIPHERAL_BRIDGE_HOST)
+
+if REMOTE_PERIPHERALS:
+    log.info(f"Fjärrperiferi-läge aktivt — LED/OLED/knapp/PIR via {PERIPHERAL_BRIDGE_HOST}")
+    from remote_peripherals import RemoteLEDController, RemoteDisplay, RemoteInputListener
+
 # ── GPIO ───────────────────────────────────────────────────────────────────────
-try:
-    import lgpio as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
+if REMOTE_PERIPHERALS:
+    # Ingen lokal GPIO alls i fjärrläge — bryggan äger hårdvaran.
     GPIO_AVAILABLE = False
-    log.warning("lgpio saknas")
+else:
+    try:
+        import lgpio as GPIO
+        GPIO_AVAILABLE = True
+    except ImportError:
+        GPIO_AVAILABLE = False
+        log.warning("lgpio saknas")
 
 # ── LED via Pi5Neo ─────────────────────────────────────────────────────────────
-try:
-    from pi5neo import Pi5Neo
-    LED_AVAILABLE = True
-except ImportError:
-    LED_AVAILABLE = False
-    log.warning("pi5neo saknas")
+if REMOTE_PERIPHERALS:
+    LED_AVAILABLE = False   # LED-hårdvaran sitter på bryggan, inte här
+else:
+    try:
+        from pi5neo import Pi5Neo
+        LED_AVAILABLE = True
+    except ImportError:
+        LED_AVAILABLE = False
+        log.warning("pi5neo saknas")
 
 # ── OLED via luma.oled (valfritt, kan köras utan om skärm inte kopplad än) ─────
 DISPLAY_AVAILABLE = False
-try:
-    from display import OLEDDisplay, HansonState
-    DISPLAY_AVAILABLE = True
-except ImportError as e:
-    log.warning(f"display.py/luma.oled inte tillgängligt ({e}) — kör utan skärm")
-except Exception as e:
-    log.error(f"Oväntat fel vid import av display.py ({e}) — kör utan skärm", exc_info=True)
+if REMOTE_PERIPHERALS:
+    DISPLAY_AVAILABLE = True   # "tillgänglig" via bryggan — se RemoteDisplay
+else:
+    try:
+        from display import OLEDDisplay, HansonState
+        DISPLAY_AVAILABLE = True
+    except ImportError as e:
+        log.warning(f"display.py/luma.oled inte tillgängligt ({e}) — kör utan skärm")
+    except Exception as e:
+        log.error(f"Oväntat fel vid import av display.py ({e}) — kör utan skärm", exc_info=True)
+
+# I fjärrläge behöver vi ändå HansonState för _set_display_state-anropen
+# nedan i filen — importera den lätta varianten om lokal display.py inte
+# redan gjorde det ovan.
+if REMOTE_PERIPHERALS:
+    try:
+        from display import HansonState
+    except ImportError:
+        class HansonState:
+            IDLE = "idle"
+            LISTENING = "listening"
+            THINKING = "thinking"
+            SPEAKING = "speaking"
+            MOTION = "motion"
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 AGENT_ID           = os.getenv("ELEVENLABS_AGENT_ID")
@@ -506,17 +542,41 @@ class RaspberryPiAgent:
         self._resolve_audio_devices()
 
         self.client              = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-        self.led                 = LEDController()
-        self.display = None
-        if DISPLAY_AVAILABLE:
-            try:
-                self.display = OLEDDisplay()
-            except Exception as e:
-                log.error(f"Display kunde inte initieras ({e}) — fortsätter utan skärm", exc_info=True)
-                self.display = None
+
+        if REMOTE_PERIPHERALS:
+            # VC60 (eller annan GPIO-lös maskin): LED/OLED/knapp/PIR går via
+            # peripheral_bridge.py på Hanson-Pi:n istället för lokal hårdvara.
+            self.led = RemoteLEDController(PERIPHERAL_BRIDGE_HOST)
+            self.display = RemoteDisplay(PERIPHERAL_BRIDGE_HOST)
+            self._remote_input = RemoteInputListener(PERIPHERAL_BRIDGE_HOST)
+            self._remote_input.start()
+        else:
+            # Normalt läge: agenten körs på en Pi med egen GPIO/LED/OLED.
+            self.led = LEDController()
+            self.display = None
+            if DISPLAY_AVAILABLE:
+                try:
+                    self.display = OLEDDisplay()
+                except Exception as e:
+                    log.error(f"Display kunde inte initieras ({e}) — fortsätter utan skärm", exc_info=True)
+                    self.display = None
+            self._remote_input = None
+
         self.gpio_chip           = None
         self.conversation        = None
         self.conversation_active = False
+
+        # Companion-skärmserver (WebSocket). Frikopplad — om paketet saknas
+        # eller ingen skärm är ansluten fortsätter agenten opåverkad.
+        self.display_server = None
+        try:
+            from display_server import DisplayServer
+            self.display_server = DisplayServer(on_touch=self._on_touch_intent)
+            self.display_server.start()
+        except Exception as e:
+            log.warning(f"Companion-skärmserver kunde inte starta ({e}) — fortsätter utan")
+            self.display_server = None
+
         self._current_audio      = None
         self._session_started_at = 0.0
         self._last_session_end   = 0.0
@@ -598,6 +658,32 @@ class RaspberryPiAgent:
                 self.display.set_state(state)
             except Exception:
                 pass
+        # Broadcasta även till companion-skärmen (om ansluten)
+        if self.display_server:
+            try:
+                mapping = {
+                    HansonState.LISTENING: "listening",
+                    HansonState.THINKING:  "thinking",
+                    HansonState.SPEAKING:  "speaking",
+                    HansonState.IDLE:      "idle",
+                }
+                ws_state = mapping.get(state)
+                if ws_state:
+                    self.display_server.set_state(ws_state)
+            except Exception:
+                pass
+
+    def _on_touch_intent(self, intent: str):
+        """
+        Anropas när companion-skärmen skickar ett touch-event (Nivå 1).
+        Startar ett samtal precis som knappen, med förvald avsikt så Gunnar
+        kan öppna i rätt kontext. Avsikten loggas; den faktiska styrningen
+        av öppningsrepliken sker via ElevenLabs (kan byggas ut senare med
+        en kontextvariabel till agenten).
+        """
+        log.info(f"Touch-event från skärm: intent={intent}")
+        if not self.conversation_active:
+            self.start_conversation(trigger=f"touch:{intent}")
 
     def _on_user_transcript(self, transcript: str):
         try:
@@ -606,6 +692,8 @@ class RaspberryPiAgent:
             self.led.start_thinking()
             if self.display:
                 self.display.set_transcript(transcript)
+            if self.display_server:
+                self.display_server.set_transcript(transcript)
             self._set_display_state(HansonState.THINKING if DISPLAY_AVAILABLE else None)
         except Exception as e:
             log.error(f"Fel i _on_user_transcript: {e}", exc_info=True)
@@ -663,6 +751,11 @@ class RaspberryPiAgent:
         self.led.stop_effect()
         self.led.pulse_once(LEDController.ENDING)
         self._set_display_state(HansonState.IDLE if DISPLAY_AVAILABLE else None)
+        if self.display_server:
+            try:
+                self.display_server.clear()
+            except Exception:
+                pass
 
     def _rate_limit_ok(self) -> bool:
         """
@@ -835,6 +928,8 @@ class RaspberryPiAgent:
         threading.Thread(target=_wake_animation, daemon=True).start()
 
     def _read_button(self) -> bool:
+        if REMOTE_PERIPHERALS:
+            return self._remote_input.poll_button() if self._remote_input else False
         if not self.gpio_chip:
             return False
         try:
@@ -847,7 +942,13 @@ class RaspberryPiAgent:
         Denna specifika HC-SR501-klon är aktiv-LÅG: vila=1, rörelse=0
         (omvänt mot standardmodulens aktiv-hög-beteende). Verifierat
         manuellt med GPIO-test innan koden skrevs.
+
+        I fjärrläge (REMOTE_PERIPHERALS) kommer redan avkantade events
+        från peripheral_bridge.py via RemoteInputListener — ingen
+        polaritetslogik behövs här, bryggan har redan gjort jobbet.
         """
+        if REMOTE_PERIPHERALS:
+            return self._remote_input.poll_motion() if self._remote_input else False
         if not self.gpio_chip:
             return False
         try:
@@ -944,6 +1045,11 @@ class RaspberryPiAgent:
         if self.display:
             try:
                 self.display.cleanup()
+            except Exception:
+                pass
+        if self._remote_input:
+            try:
+                self._remote_input.stop()
             except Exception:
                 pass
         if self.gpio_chip:
