@@ -22,12 +22,12 @@ for i in $(seq 1 20); do
 done
 
 # ── Echo-cancel-sinkens volym (den virtuella enheten agenten spelar till) ──
-EC_SINK_ID=$(wpctl status | grep -i "hanson_echo_cancelled_speaker" | grep -oE '^\s*│?\s*[0-9]+' | grep -oE '[0-9]+' | head -1)
-if [ -n "$EC_SINK_ID" ]; then
-    wpctl set-volume "$EC_SINK_ID" 1.0 || echo "VARNING: kunde inte sätta volym på echo-cancel-sink"
-    wpctl set-mute "$EC_SINK_ID" 0 2>/dev/null || true
-    echo "[start-vc60] Echo-cancel-sink (ID $EC_SINK_ID) satt till full volym."
-fi
+# Använder pactl med NAMN istället för wpctl+ID — robustare, eftersom
+# wpctl-outputens trädstruktur kan variera mellan terminaler/miljöer och
+# göra ID-utvinning med grep skört.
+pactl set-sink-volume hanson_echo_cancelled_speaker 100% 2>/dev/null || echo "VARNING: kunde inte sätta volym på echo-cancel-sink"
+pactl set-sink-mute hanson_echo_cancelled_speaker 0 2>/dev/null || true
+echo "[start-vc60] Echo-cancel-sink satt till full volym."
 
 # ── USB-högtalarens (UACDemo/Jieli) volym — BEKRÄFTAT 75% funkar utan eko ──
 pactl set-sink-volume alsa_output.usb-Jieli_Technology_UACDemoV1.0_4150344535343812-00.analog-stereo 75% 2>/dev/null || true
