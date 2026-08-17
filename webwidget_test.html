@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<title>Hanson — Webbwidget-test (Chrome AEC)</title>
+<style>
+  body {
+    background: #0e1116;
+    color: #e8ecf2;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+  }
+  h1 { font-size: 20px; font-weight: 500; margin-bottom: 8px; }
+  p { color: #8b97ab; font-size: 14px; max-width: 480px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Hanson — Webbwidget-test</h1>
+  <p>
+    Testar ElevenLabs webbwidget med Chromes inbyggda WebRTC AEC istället
+    för vår egen PipeWire-kedja. Klicka på widgeten nedan och prata.
+  </p>
+
+  <elevenlabs-convai agent-id="agent_7201ka0kdqt1ejjvr6kgzhfpbsbp"></elevenlabs-convai>
+  <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async></script>
+</body>
+</html>
