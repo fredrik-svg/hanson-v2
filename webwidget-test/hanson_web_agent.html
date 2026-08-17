@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Hanson Entré</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0e1116; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { width: 100%; height: 100vh; display: flex; flex-direction: column; }
+
+  .top { display: flex; align-items: center; justify-content: space-between; padding: 20px 32px; border-bottom: 1px solid #1c2230; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo { width: 44px; height: 44px; border-radius: 9px; background: #f0997b; display: flex; align-items: center; justify-content: center; font-size: 26px; color: #4a1b0c; }
+  .brand-name { font-size: 18px; font-weight: 600; color: #e8ecf2; letter-spacing: 0.5px; }
+  .brand-sub { font-size: 12px; color: #6b7688; letter-spacing: 1.5px; }
+  .clock { font-size: 20px; font-weight: 600; color: #e8ecf2; font-variant-numeric: tabular-nums; }
+  .conn { font-size: 11px; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; justify-content: flex-end; margin-top: 2px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .conn.online { color: #5dcaa5; } .conn.online .dot { background: #5dcaa5; }
+  .conn.offline { color: #e24b4a; } .conn.offline .dot { background: #e24b4a; }
+  .conn.talking { color: #378add; } .conn.talking .dot { background: #378add; }
+
+  .main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 32px; position: relative; }
+
+  .orb { width: 116px; height: 116px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-bottom: 22px; background: #151b26; border: 3px solid #232c3d; transition: all 0.45s ease; cursor: pointer; }
+  .orb .icon { font-size: 52px; color: #4a5568; transition: all 0.45s ease; }
+  .orb.pulse { animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+  .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+
+  .state-label { font-size: 26px; font-weight: 600; color: #e8ecf2; text-align: center; min-height: 32px; }
+  .state-sub { font-size: 16px; color: #8b97ab; text-align: center; max-width: 620px; line-height: 1.5; margin-top: 8px; min-height: 24px; }
+
+  .transcript { margin-top: 18px; padding: 14px 24px; background: #151b26; border: 1px solid #232c3d; border-radius: 12px; max-width: 680px; opacity: 0; transition: opacity 0.3s; }
+  .transcript.show { opacity: 1; }
+  .transcript .lbl { font-size: 10px; color: #5b6577; letter-spacing: 1.5px; margin-bottom: 5px; }
+  .transcript .txt { font-size: 17px; color: #b8c2d4; font-style: italic; line-height: 1.4; }
+
+  .menu { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; width: 100%; max-width: 720px; margin-top: 26px; }
+  .tile { display: flex; align-items: center; gap: 16px; padding: 20px 22px; background: #151b26; border: 1px solid #232c3d; border-radius: 14px; text-align: left; transition: all 0.15s; cursor: pointer; }
+  .tile:active { transform: scale(0.97); background: #1c2434; }
+  .tile .t-icon { font-size: 30px; flex-shrink: 0; }
+  .tile .t-title { font-size: 18px; font-weight: 600; color: #e8ecf2; }
+  .tile .t-sub { font-size: 13px; color: #6b7688; margin-top: 2px; }
+  .menu.hidden { display: none; }
+
+  .err-banner { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); background: #2a1414; border: 1px solid #5a2424; color: #e8a3a3; padding: 10px 18px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+  .err-banner.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo">🏭</div>
+      <div>
+        <div class="brand-name">HANSON INDUSTRIES</div>
+        <div class="brand-sub">ENTRÉ · RECEPTION</div>
+      </div>
+    </div>
+    <div style="text-align:right;">
+      <div class="clock" id="clock">--:--</div>
+      <div class="conn offline" id="conn"><span class="dot"></span><span id="conn-txt">STARTAR…</span></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="orb" id="orb" title="Tryck för att prata"><span class="icon" id="orb-icon">🌙</span></div>
+    <div class="state-label" id="label">Välkommen till Hanson</div>
+    <div class="state-sub" id="sub">Tryck på ett val, eller tryck på ringen för att prata.</div>
+
+    <div class="transcript" id="transcript">
+      <div class="lbl">SENAST HÖRT</div>
+      <div class="txt" id="transcript-text"></div>
+    </div>
+
+    <div class="menu" id="menu">
+      <div class="tile" data-intent="person">
+        <span class="t-icon">🔍</span>
+        <div><div class="t-title">Jag söker en person</div><div class="t-sub">Anmäl ditt besök</div></div>
+      </div>
+      <div class="tile" data-intent="leverans">
+        <span class="t-icon">📦</span>
+        <div><div class="t-title">Jag har en leverans</div><div class="t-sub">Meddela godsmottagning</div></div>
+      </div>
+      <div class="tile" data-intent="info">
+        <span class="t-icon">ℹ️</span>
+        <div><div class="t-title">Om Hanson</div><div class="t-sub">Vad vi gör</div></div>
+      </div>
+      <div class="tile" data-intent="prata">
+        <span class="t-icon">🎙️</span>
+        <div><div class="t-title">Prata med Gunnar</div><div class="t-sub">Säg vad du behöver</div></div>
+      </div>
+    </div>
+
+    <div class="err-banner" id="err-banner"></div>
+  </div>
+</div>
+
+<script type="module">
+  import { Conversation } from "https://esm.sh/@elevenlabs/client";
+
+  // ── Konfiguration ─────────────────────────────────────────────────────
+  const AGENT_ID = "agent_7201ka0kdqt1ejjvr6kgzhfpbsbp";
+  // Hanson-Pi:ns IP — samma peripheral_bridge.py som Python-agenten använde
+  // för LED/knapp/PIR. Lämna tom sträng "" för att köra helt utan brygga
+  // (t.ex. under utveckling/test på en dator utan LED-hårdvara ansluten).
+  const PERIPHERAL_BRIDGE_HOST = "192.168.1.69";
+  const BRIDGE_HTTP = PERIPHERAL_BRIDGE_HOST ? `http://${PERIPHERAL_BRIDGE_HOST}:5001` : null;
+  const BRIDGE_WS   = PERIPHERAL_BRIDGE_HOST ? `ws://${PERIPHERAL_BRIDGE_HOST}:8766` : null;
+
+  // ── DOM-referenser ───────────────────────────────────────────────────
+  const el = {
+    clock: document.getElementById('clock'),
+    conn: document.getElementById('conn'),
+    connTxt: document.getElementById('conn-txt'),
+    orb: document.getElementById('orb'),
+    orbIcon: document.getElementById('orb-icon'),
+    label: document.getElementById('label'),
+    sub: document.getElementById('sub'),
+    transcript: document.getElementById('transcript'),
+    transcriptText: document.getElementById('transcript-text'),
+    menu: document.getElementById('menu'),
+    errBanner: document.getElementById('err-banner'),
+  };
+
+  function tick() {
+    const d = new Date();
+    el.clock.textContent = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  tick(); setInterval(tick, 10000);
+
+  // ── Visuella tillstånd (samma färgschema som Python-agentens LED) ──────
+  const STATES = {
+    idle:      { bg: '#151b26', bd: '#232c3d', icon: '🌙', pulse: false, label: 'Välkommen till Hanson', sub: 'Tryck på ett val, eller tryck på ringen för att prata.' },
+    connecting:{ bg: '#241d0d', bd: '#ba7517', icon: '⏳', pulse: false, spin: true, label: 'Ansluter…', sub: '' },
+    listening: { bg: '#0d1f2e', bd: '#185fa5', icon: '🎤', pulse: true,  label: 'Lyssnar…', sub: 'Gunnar lyssnar på dig.' },
+    speaking:  { bg: '#1d1526', bd: '#7f77dd', icon: '🔊', pulse: true,  label: 'Gunnar svarar', sub: '' },
+  };
+
+  function applyState(name) {
+    const c = STATES[name] || STATES.idle;
+    el.orb.style.background = c.bg;
+    el.orb.style.borderColor = c.bd;
+    el.orbIcon.textContent = c.icon;
+    el.orb.className = 'orb' + (c.pulse ? ' pulse' : '') + (c.spin ? ' spin' : '');
+    el.label.textContent = c.label;
+    if (c.sub !== '') el.sub.textContent = c.sub;
+    if (name === 'idle') {
+      el.menu.classList.remove('hidden');
+      el.transcript.classList.remove('show');
+    } else {
+      el.menu.classList.add('hidden');
+    }
+  }
+
+  function showError(msg) {
+    el.errBanner.textContent = msg;
+    el.errBanner.classList.add('show');
+    setTimeout(() => el.errBanner.classList.remove('show'), 4000);
+  }
+
+  // ── Peripheral bridge — LED-uppdateringar (fire-and-forget, samma
+  //    designprincip som remote_peripherals.py: aldrig blockera/krascha
+  //    konversationen om Pi:n/nätverket är otillgängligt) ──────────────
+  function ledUpdate(state) {
+    if (!BRIDGE_HTTP) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 800);
+    fetch(`${BRIDGE_HTTP}/led/${state}`, { signal: controller.signal })
+      .catch(() => {})
+      .finally(() => clearTimeout(timeout));
+  }
+
+  // ── Konversationshantering ───────────────────────────────────────────
+  let conversation = null;
+  let active = false;
+
+  async function startConversation(intent) {
+    if (active) return;
+    active = true;
+    applyState('connecting');
+    el.conn.className = 'conn talking';
+    el.connTxt.textContent = 'ANSLUTER';
+
+    try {
+      conversation = await Conversation.startSession({
+        agentId: AGENT_ID,
+
+        onConnect: ({ conversationId }) => {
+          console.log('Ansluten:', conversationId);
+          el.conn.className = 'conn talking';
+          el.connTxt.textContent = 'SAMTAL PÅGÅR';
+          applyState('listening');
+          ledUpdate('listening');
+        },
+
+        onDisconnect: () => {
+          console.log('Frånkopplad');
+          active = false;
+          conversation = null;
+          el.conn.className = 'conn online';
+          el.connTxt.textContent = 'ONLINE';
+          applyState('idle');
+          ledUpdate('idle');
+        },
+
+        onModeChange: (m) => {
+          // m.mode är antingen 'listening' eller 'speaking'
+          applyState(m.mode === 'speaking' ? 'speaking' : 'listening');
+          ledUpdate(m.mode === 'speaking' ? 'speaking' : 'listening');
+        },
+
+        onUserTranscript: (t) => {
+          el.transcriptText.textContent = '"' + t.message + '"';
+          el.transcript.classList.add('show');
+        },
+
+        onError: (message) => {
+          console.error('Konversationsfel:', message);
+          showError('Ett fel uppstod: ' + message);
+        },
+      });
+    } catch (e) {
+      console.error('Kunde inte starta konversation:', e);
+      showError('Kunde inte ansluta till Gunnar. Försök igen.');
+      active = false;
+      applyState('idle');
+      el.conn.className = 'conn offline';
+      el.connTxt.textContent = 'FEL';
+    }
+  }
+
+  async function endConversation() {
+    if (conversation) {
+      try { await conversation.endSession(); } catch (e) { /* redan nedkopplad */ }
+    }
+    active = false;
+    conversation = null;
+    applyState('idle');
+    ledUpdate('idle');
+  }
+
+  // ── Touch: ringen och tiles startar/avslutar samtal ─────────────────
+  el.orb.addEventListener('click', () => {
+    if (active) endConversation(); else startConversation('prata');
+  });
+
+  document.querySelectorAll('.tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const intent = tile.dataset.intent;
+      startConversation(intent);
+      // NOT: avsikten styr ännu inte Gunnars öppningsreplik (samma
+      // begränsning som fanns i Python-versionen — kräver dynamic
+      // variables kopplade till prompten för att gå vidare).
+    });
+  });
+
+  // ── Fjärrknapp/PIR från peripheral_bridge.py (Hanson-Pi:n) ───────────
+  // Samma roll som RemoteInputListener i Python-versionen: ansluter som
+  // WebSocket-klient, startar samtal vid knapptryck, återansluter
+  // automatiskt om anslutningen tappas.
+  function connectBridgeEvents() {
+    if (!BRIDGE_WS) return;
+    let ws;
+    try {
+      ws = new WebSocket(BRIDGE_WS);
+    } catch (e) {
+      setTimeout(connectBridgeEvents, 2000);
+      return;
+    }
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'button_press' && !active) {
+          startConversation('knapp');
+        }
+        // msg.type === 'motion' hanteras inte här — rent kosmetisk
+        // reaktion, kan läggas till senare om önskat (t.ex. en kort
+        // glow-animation utan att starta ett samtal).
+      } catch (e) { /* ignorera ogiltiga meddelanden */ }
+    };
+    ws.onclose = () => setTimeout(connectBridgeEvents, 2000);
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  // ── Initiera ──────────────────────────────────────────────────────────
+  applyState('idle');
+  el.conn.className = 'conn online';
+  el.connTxt.textContent = 'ONLINE';
+  connectBridgeEvents();
+</script>
+</body>
+</html>
