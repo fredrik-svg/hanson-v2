@@ -67,7 +67,8 @@
     </div>
     <div style="text-align:right;">
       <div class="clock" id="clock">--:--</div>
-      <div class="conn offline" id="conn"><span class="dot"></span><span id="conn-txt">STARTAR…</span></div>
+      <div class="conn offline" id="conn"><span class="dot"></span><span id="conn-txt">VILOLÄGE</span></div>
+      <div class="conn offline" id="bridge-conn" style="margin-top:3px; font-size:9px;"><span class="dot"></span><span id="bridge-conn-txt">BRYGGA: STARTAR…</span></div>
     </div>
   </div>
 
@@ -109,6 +110,17 @@
 </div>
 
 <script type="module">
+  // Global felfångst — visar JS-fel direkt på skärmen så framtida problem
+  // kan diagnostiseras utan att koppla in tangentbord/devtools på plats.
+  window.addEventListener('error', (e) => {
+    console.error('Global JS-fel:', e.message, e.filename, e.lineno);
+    const banner = document.getElementById('err-banner');
+    if (banner) {
+      banner.textContent = 'JS-fel: ' + e.message + ' (rad ' + e.lineno + ')';
+      banner.classList.add('show');
+    }
+  });
+
   import { Conversation } from "https://esm.sh/@elevenlabs/client";
 
   // ── Konfiguration ─────────────────────────────────────────────────────
@@ -116,7 +128,7 @@
   // Hanson-Pi:ns IP — samma peripheral_bridge.py som Python-agenten använde
   // för LED/knapp/PIR. Lämna tom sträng "" för att köra helt utan brygga
   // (t.ex. under utveckling/test på en dator utan LED-hårdvara ansluten).
-  const PERIPHERAL_BRIDGE_HOST = "192.168.1.18";
+  const PERIPHERAL_BRIDGE_HOST = "192.168.1.69";
   const BRIDGE_HTTP = PERIPHERAL_BRIDGE_HOST ? `http://${PERIPHERAL_BRIDGE_HOST}:5001` : null;
   const BRIDGE_WS   = PERIPHERAL_BRIDGE_HOST ? `ws://${PERIPHERAL_BRIDGE_HOST}:8766` : null;
 
@@ -125,6 +137,8 @@
     clock: document.getElementById('clock'),
     conn: document.getElementById('conn'),
     connTxt: document.getElementById('conn-txt'),
+    bridgeConn: document.getElementById('bridge-conn'),
+    bridgeConnTxt: document.getElementById('bridge-conn-txt'),
     orb: document.getElementById('orb'),
     orbIcon: document.getElementById('orb-icon'),
     label: document.getElementById('label'),
@@ -160,8 +174,13 @@
     const c = STATES[name] || STATES.idle;
     el.orb.style.background = c.bg;
     el.orb.style.borderColor = c.bd;
-    el.orbIcon.innerHTML = c.icon;
-    el.orbIcon.querySelector('svg').style.stroke = c.bd;
+    try {
+      el.orbIcon.innerHTML = c.icon;
+      const svg = el.orbIcon.querySelector('svg');
+      if (svg) svg.style.stroke = c.bd;
+    } catch (e) {
+      console.error('Kunde inte uppdatera orb-ikon:', e);
+    }
     el.orb.className = 'orb' + (c.pulse ? ' pulse' : '') + (c.spin ? ' spin' : '');
     el.label.textContent = c.label;
     if (c.sub !== '') el.sub.textContent = c.sub;
@@ -176,7 +195,7 @@
   function showError(msg) {
     el.errBanner.textContent = msg;
     el.errBanner.classList.add('show');
-    setTimeout(() => el.errBanner.classList.remove('show'), 4000);
+    setTimeout(() => el.errBanner.classList.remove('show'), 15000);
   }
 
   // ── Peripheral bridge — LED-uppdateringar (fire-and-forget, samma
@@ -296,15 +315,38 @@
   // Samma roll som RemoteInputListener i Python-versionen: ansluter som
   // WebSocket-klient, startar samtal vid knapptryck, återansluter
   // automatiskt om anslutningen tappas.
+  let bridgeRetryCount = 0;
+
+  function setBridgeStatus(state) {
+    // state: 'connecting' | 'online' | 'offline'
+    if (state === 'online') {
+      el.bridgeConn.className = 'conn online';
+      el.bridgeConnTxt.textContent = 'BRYGGA: ONLINE';
+      bridgeRetryCount = 0;
+    } else if (state === 'connecting') {
+      el.bridgeConn.className = 'conn talking';
+      el.bridgeConnTxt.textContent = 'BRYGGA: ANSLUTER…';
+    } else {
+      el.bridgeConn.className = 'conn offline';
+      el.bridgeConnTxt.textContent = 'BRYGGA: FRÅNKOPPLAD (' + bridgeRetryCount + ')';
+    }
+  }
+
   function connectBridgeEvents() {
-    if (!BRIDGE_WS) return;
+    if (!BRIDGE_WS) { setBridgeStatus('offline'); return; }
+    setBridgeStatus('connecting');
     let ws;
     try {
       ws = new WebSocket(BRIDGE_WS);
     } catch (e) {
-      setTimeout(connectBridgeEvents, 2000);
+      bridgeRetryCount++;
+      setBridgeStatus('offline');
+      setTimeout(connectBridgeEvents, 3000);
       return;
     }
+    ws.onopen = () => {
+      setBridgeStatus('online');
+    };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
@@ -316,14 +358,17 @@
         // glow-animation utan att starta ett samtal).
       } catch (e) { /* ignorera ogiltiga meddelanden */ }
     };
-    ws.onclose = () => setTimeout(connectBridgeEvents, 2000);
+    ws.onclose = () => {
+      bridgeRetryCount++;
+      setBridgeStatus('offline');
+      setTimeout(connectBridgeEvents, 3000);
+    };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
   // ── Initiera ──────────────────────────────────────────────────────────
   applyState('idle');
-  el.conn.className = 'conn online';
-  el.connTxt.textContent = 'ONLINE';
+  setBridgeStatus('connecting');
   connectBridgeEvents();
 </script>
 </body>
